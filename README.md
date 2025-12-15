@@ -97,7 +97,7 @@ Legend:
   </tr>
   <tr>
     <td>DE250</td>
-    <td>DEesign Lab</td>
+    <td>Design Lab</td>
     <td> 6 </td>
   </tr>
   <tr>
