@@ -1,0 +1,305 @@
+
+\documentclass[12pt]{article}
+\usepackage {fullpage,amsmath,amssymb,lipsum,url}
+\usepackage{hyperref}
+\usepackage{geometry}
+\geometry{
+  a4paper,
+  total={210mm,297mm},
+  left=5mm,
+  right=10mm,
+  top=10mm,
+  bottom=20mm,
+}
+
+\usepackage[scaled]{helvet}
+\renewcommand*\familydefault{\sfdefault} %% Only if the base font of the document is to be sans serif
+\usepackage[T1]{fontenc}
+
+\title {CS-736 Assignment: \\ Statistical Image Modeling, Image Denoising}
+
+\author {Instructor: Suyash P. Awate}
+
+\date {}
+
+\begin {document}
+
+\maketitle
+
+\setlength{\parindent}{0cm}
+
+\begin {enumerate}
+  
+\item {\bf (25 points) Bayesian Denoising of a Phantom Magnetic Resonance Image.}
+  
+  Get the 2D noiseless image and the 2D noisy image in the ``data'' folder.
+  
+  Implement a {\bf maximum-a-posteriori Bayesian image-denoising} algorithm that uses a suitable noise model
+  (i.i.d. Gaussian or independent Rician) coupled with a MRF prior that uses a $4$-neighbor neighborhood
+  system (each pixel has $4$ neighbors: left, right, up, down; the neighborhood wraps around at image
+  boundaries) that has cliques of size {\em no} more than $2$.
+  
+  Use gradient ascent optimization with dynamic step size; implementing a fixed step size isn't
+  acceptable. Ensure that the value of the objective function, i.e., the log posterior, at each iteration
+  increases. Use the noisy image as the initial estimate.
+  
+  Use $3$ different MRF priors where the potential functions $V (x_i, x_j) := g (x_i - x_j)$ underlying the
+  MRF penalize the difference between the neighboring voxel values $x_i,x_j$ as follows (see class notes for
+  details). You may rely on the
+  ``\href{https://in.mathworks.com/help/matlab/ref/circshift.html}{circshift}()'' function in Matlab when
+  computing differences between every pixel in the image and its neighbors.
+  
+  Introduce real-valued parameters $\alpha > 0$ and $\beta > 0$ to control the weighting between the prior and
+  the likelihood.
+  
+  Specifically, implement the following functionality as part of the denoising algorithm:
+  \begin {enumerate}
+  \item (2 points)
+
+    A suitable noise model.
+
+  \item (2 points)
+
+    MRF prior: Quadratic function: $g_1 (u) := |u|^2$.
+    
+  \item (2 points)
+    
+    MRF prior: Discontinuity-adaptive Huber function: $g_2 (u) := 0.5 |u|^2$, when $|u| \le \gamma$ and
+    $g (u) := \gamma |u| - 0.5 \gamma^2$, when $|u| > \gamma$, where $0 < \gamma < \infty$ is a constant.
+    
+  \item (2 points)
+    
+    MRF prior: Discontinuity-adaptive function: $g_3 (u) := \gamma |u| - \gamma^2 \log (1 + |u| / \gamma)$,
+    where $0 < \gamma < \infty$ is a constant.
+  \end {enumerate}
+  
+  For each MRF prior, manually tune the parameters to denoising the noisy image in order to achieve the least
+  possible relative root-mean-squared error (RRMSE). The RRMSE for 2
+  images $A$ and $B$ is defined as : \\
+  $\text{RRMSE}(A,B) = \sqrt {\sum_p (|A(p)| - |B(p)|)^2} / \sqrt {\sum_p |A(p)|^2}$, where the summation is
+  over all pixels $p$; always use the noiseless image as $A$.
+  
+  Report the following:
+  \begin {enumerate}
+  \item (0 point)
+
+    Report the RRMSE between the noisy and noiseless images.
+    
+  \item (8 points)
+
+    Report the optimal values of the parameters and the corresponding RRMSEs for each of the 3 denoising
+    algorithms.  For each optimal parameter value reported (for each of the 3 denoising algorithms), give
+    evidence of the optimality of the reported values by reporting the RRMSE values for two nearby parameter
+    values (around the optimal) at plus/minus $20\%$ of the optimal value. That is, if $a^*,b^*$ are
+    the optimal parameter values, then report: \\ $a^*, b^*, \text{RRMSE}(a^*, b^*)$, \\
+    $\text{RRMSE}(1.2 a^*, b^*), \text{RRMSE}(0.8 a^*, b^*)$, \\
+    $\text{RRMSE}(a^*, 1.2 b^*), \text{RRMSE}(a^*, 0.8 b^*)$. \\
+    {\em (Tip: the optimal values for $\alpha$ and $\beta$ might be very close to extreme limits of the
+      allowed range. Be aware of that possibility.)  }.
+    
+  \item (6 points)
+    
+    Show the following $5$ images (at each pixel, show the magnitude of the pixel value; use a jet colormap)
+    in the report using exactly the same colormap (i)~Noiseless image, (ii)~Noisy image,
+    
+    (iii)~Image denoised using quadratic prior $g_1 (\cdot)$ and optimal parameter tuning;
+    
+    (iv)~Image denoised using Huber prior $g_1 (\cdot)$ and optimal parameter tuning;
+    
+    (v)~Image denoised using discontinuity-adaptive prior $g_3 (\cdot)$ and optimal parameter tuning.
+    
+  \item (3 points)
+    
+    Show the plots of the objective-function values (vertical axis) versus iteration (horizontal axis)
+    corresponding to each of the 3 denoised results in (iii), (iv), and (v) above.
+  \end {enumerate}
+  
+  \newpage
+  
+\item {\bf (9=6+3 points)  Bayesian Denoising of a Brain Magnetic Resonance Image.}
+  
+  Repeat the same task for the brain MRI image in the ``data'' folder.
+
+  Show the images and the plots.
+  
+  \newpage
+  
+\item {\bf (9=6+3 points) Bayesian Denoising of a RGB Microscopy Image.}
+  
+  Repeat the same task for the microscopy image in the ``data'' folder (assuming a Gaussian noise model as an
+  approximation), but with the following MRF prior functions:
+  
+  (A)~where the penalty between two vector-valued neighboring pixels is the squared-L2-norm of their vector
+  difference;
+  
+  (B)~where the penalty between two vector-valued neighboring pixels is the L2 norm of their vector
+  difference;
+  
+  (C)~where the penalty between two vector-valued neighboring pixels is the (Huber-regularized) L1 norm of
+  their vector difference.
+  
+  \begin {enumerate}
+    
+  \item (6 points) Show the following $5$ images (at each pixel, show the magnitude of the pixel value; use a
+    jet colormap) in the report using exactly the same colormap (i)~Noiseless image, (ii)~Noisy image,
+    
+    (iii)~Image denoised using prior-A and optimal parameter tuning,
+    
+    (iv)~Image denoised using prior-B and optimal parameter tuning,
+    
+    (v)~Image denoised using prior-C and optimal parameter tuning.
+    
+    In which of the three cases (i.e., A,B,C) do you observe edge preservation~? and why~?
+    
+  \item (3 points) Show the plots of the objective-function values (vertical axis) versus iteration
+    (horizontal axis) corresponding to each of the 3 denoised results above.
+    
+  \end {enumerate}
+  
+  \newpage
+  
+\item {\bf (25 points) Dictionary Learning on Image Patches, Followed by Image Denoising.}
+  
+  Get the 2D chest-CT image in the ``data'' folder.
+  
+  Consider a dictionary matrix $D$ with $K$ columns as its atoms, where the $k$-th column $d_k$, for any $k$,
+  has $\| d_k \|_2 \le 1$ (hard constraint).
+  
+  Consider the following dictionary learning formulation for some set of image patches $\{ x_i \}_{i=1}^I$,
+  under the hard constraint stated above:
+  
+  $$\arg \min_D \min_r \sum_{i=1}^I \| x_i - D r_i \|_2^2 + \lambda \| r_i \|_p^p ,$$
+  
+  where each $r_i$ is a column vector (of length $K$) containing the coefficients used in the representation
+  of image patch $x_i$, and $p > 0$ parameterizes the norm/quasi-norm of the vector $r_i$.
+  
+  \begin {enumerate}
+  \item (9 points)
+    
+    Implement a function to learn the dictionary $D$ for image patches of size 8$\times$8 pixels. The
+    dictionary $D$ should have the number of atoms $K = 64$. Your optimization algorithm should be the same
+    for any suitable choice of $p$.
+    
+    For computational efficiency, the learning must only use a subset of image patches that have a
+    sufficiently large variance of intensities withing the patch (e.g., avoiding constant-intensity patches).
+    Nevertheless, the final dictionary must indeed be able to model and fit all kinds of patches. With these
+    design motivations, engineer a strategy to create the subset of patches $\{ x_i \}_{i=1}^I$ (within the
+    given image) that will be used to learn $D$, and justify your strategy.
+    
+  \item (6 points)
+    
+    Use your function to learn four different dictionaries for values of $p = 2$, $p = 1.6$, $p = 1.2$,
+    $p = 0.8$.
+    
+    $\bullet$  (2 points)
+    
+    In each of the 4 cases, during the optimization process, show the graph of the objective function versus
+    iterations.
+    
+    $\bullet$  (2 points)
+    
+    In each of the 4 cases, before and after the optimization process, show the atoms used as the initial
+    estimate (must be same for all cases) and the optimal estimates. Describe any trend that you observe.
+    
+    $\bullet$  (2 points)
+    
+    In each of the 4 cases, after the optimization process, show the histogram of coefficients within each
+    $r_i$, pooled across all $r_i$. Describe and justify the trend that you (expect to) observe.
+    
+  \item (10 points)
+    
+    $\bullet$ (2 points)
+    
+    Given the 2D chest-CT image, simulate a noisy (or noisier) version by introducing i.i.d. Gaussian
+    zero-mean noise of standard deviation equaling 10\% of the intensity range in the given image.
+    
+    $\bullet$ (4 points)
+    
+    You want to use the learned dictionary for $p = 0.8$ to denoise the simulated noisy image (not just a
+    subset of its patches). Propose an optimization problem for the same, and implement a function to compute
+    an optimal estimate of the denoised image.
+    
+    $\bullet$  (2 points)
+    
+    During the optimization process, show the graph of the objective function versus iterations.
+    
+    $\bullet$  (2 points)
+    
+    Show the simulated noisy image, the denoised image, and the original/given image.
+    
+  \end {enumerate}
+  
+  
+  % 
+  % Get the 2D noisy image in the ``data'' folder.
+  
+  % Treat the image as vector valued, i.e., complex valued. Consider the noise model in each component as
+  % i.i.d. Gaussian.
+  
+  % Use all 3 maximum-a-posteriori Bayesian denoising algorithms implemented to denoise the noisy brain image.
+  
+  % Manually tune the parameters to give the best denoised image that, based on your judgment, gives the right
+  % tradeoff between noise removal and edge
+  % preservation.
+  
+  % Report the following:
+  % \begin {enumerate}
+  % \item
+  %   (2 points) Using the (vector-valued) intensities in the background (i.e., air), estimate the noise level,
+  %   i.e., the standard deviation of the
+  %   i.i.d. Gaussian noise in the each component of the vector-valued MR image.
+  % \item
+  %   (12 points) Show the following $4$ images (at each pixel, show the magnitude of the pixel value) in the
+  %   report using exactly the same colormap
+  %   (i)~Noisy image, (ii)~Image denoised using quadratic prior $g_1 (\cdot)$ and manual parameter tuning,
+  %   (iii)~Image denoised using Huber prior $g_1
+  %   (\cdot)$ and manual parameter tuning, and (iv)~Image denoised using discontinuity-adaptive prior
+  %   $g_3 (\cdot)$ and manual parameter tuning.
+  % \item
+  %   (6 points) Show the plots of the objective-function values (vertical axis) versus iteration (horizontal
+  %   axis) corresponding to each of the 3
+  %   denoised results in (ii), (iii), and (iv) above.
+  % \end {enumerate}
+  
+  % \item (20 points) Diffusion Tensor Magnetic Resonance Imaging.
+  
+  %   Consider a diffusion-MRI experiment (in 2D) that performs diffusion imaging for a chosen set of $N$
+  %   gradient directions $\{ g_i \}_{i=1}^N$ and
+  %   provides the values $\{ S (g_i) \}_{i=1}^N$ corresponding to each direction.
+  
+  %   The direction vectors are:
+  
+  %   $\{ g_i \}_{i=1}^6 = \{ [1, 0], [0.866, 0.5], [0.5, 0.866], [0, 1], [-0.5, 0.866], [-0.866, 0.5] \}$.
+  
+  %   For a particular pixel in the image, the acquired data for each direction vector (in the same sequence as
+  %   above) are:
+  
+  %   $\{ S (g_i) \}_{i=1}^6 = \{ 0.5045 - i0.0217, 0.6874 + i0.0171, 0.3632 + i0.1789, 0.3483 + i0.1385,
+  %   0.2606 - i0.0675, 0.2407 + i0.1517 \}$.
+  
+  %   Use a diffusion-tensor model that represents diffusion using a $2 \times 2$ symmetric positive-definite
+  %   matrix $D$.
+  
+  %   Assume $S_0 = 1$ and $b_0 = 0.1$.
+  
+  %   \begin {enumerate}
+  %   \item
+  %     (14 points) Given this data, estimate $D$ using a suitable optimization algorithm, report $D$, and plot
+  %     the sequences of the logarithm of the
+  %     objective function and the 4 entries in $D$ over iteration.
+  %    %     Answer: Dest = [ [ 6.6865   -4.2941 ] ; [ -4.2941   13.1412 ] ]
+  %   \item
+  %     (3 points) Report the (principal) direction (unit vector) along which the diffusion in the 2D plane is
+  %     the strongest.
+  %    %     Answer: direction [-0.4468, 0.8947]
+  %   \item
+  %     (3 points) How much more (by what multiplicative factor) is the diffusion in the principal direction as
+  %     compared to the diffusion in the direction
+  %     orthogonal to it ?
+  %    %     Answer: eigenvalue ratio = 3.3653
+  %   \end {enumerate}
+
+\end {enumerate}
+
+
+\end {document}

@@ -20,46 +20,59 @@ This is a collection of resources given by the professors at IIT Bombay for the 
           <td colspan="2"><b>2:00-3:00</b></td>
           <td colspan="2"><b>3:00-4:00</b></td>
           <td colspan="2"><b>4:00-5:00</b></td>
+          <th rowspan="6">B<br>R<br>E<br>A<br>K</th>
+          <td colspan="3"><b>5:30-6:55</b></td>
+          <td colspan="3"><b>7:05-8:25</b></td>          
       </tr>
       <tr>
           <td colspan="2">Monday</td>
           <td colspan = "2"> </td>
           <td colspan="2">CS219</td>
-          <td colspan="2"> </td>
+          <td colspan="2">EE708</td>
           <td colspan="2">CS218</td>
           <td colspan="6">CS240</td>
+          <td colspan="3">EE605</td>
+          <td colspan="3"> </td>
       </tr>
       <tr>
           <td colspan="2">Tuesday</td>
           <td colspan="2">CS218</td>
           <td colspan="2"> </td>
           <td colspan="2">CS219</td>
-          <td colspan="2"> </td>
+          <td colspan="2">EE708</td>
           <td colspan="6">DE250(for G3)</td>
+          <td colspan="3"> </td>
+          <td colspan="3"> </td>
       </tr>
       <tr>
         <td colspan="2">Wednesday</td>
         <td colspan="2"> </td>
-        <td colspan="3">Minor Slot</td>
+        <td colspan="3">CS736</td>
         <td colspan="3">CS217</td>
         <td colspan="2"> </td>
         <td colspan="2"> </td>
         <td colspan="2"> </td>
+        <td colspan="3"> </td>
+        <td colspan="3"> </td>
     </tr>
     <tr>
         <td colspan="2">Thursday</td>
-        <td colspan="2"> </td>
+        <td colspan="2">EE708</td>
         <td colspan="2">CS218</td>
         <td colspan="2"> </td>
         <td colspan="2">CS219</td>
         <td colspan="6">CS236</td>
+        <td colspan="3">EE605</td>
+        <td colspan="3"> </td>
     </tr>
     <tr>
         <td colspan="2">Friday</td>
         <td colspan="2"> </td>
-        <td colspan="3">Minor Slot</td>
+        <td colspan="3">CS736</td>
         <td colspan="3"> CS217 </td>
         <td colspan="6">DE250(for G7)</td>
+        <td colspan="3"> </td>
+        <td colspan="3"> </td>
     </tr>
 </table>
 
@@ -69,6 +82,9 @@ Legend:
     <td>Course</td>
     <td>Name</td>
     <td>Credits</td>
+  </tr>
+  <tr>
+    <th colspan="3" style="text-align: center;">CORE</th>
   </tr>
   <tr>
     <td>CS217</td>
@@ -101,11 +117,40 @@ Legend:
     <td> 6 </td>
   </tr>
   <tr>
-    <td>HS250/ES250</td>
+    <td>HS250</td>
+    <td>Environmental Studies: Science and Engineering </td>
+    <td> P/NP </td>
+  </tr>
+  <tr>
+    <td>ES250</td>
     <td>Environmental Studies</td>
+    <td> P/NP </td>
+  </tr>
+  <tr>
+    <th colspan="3" style="text-align: center;">ELECTIVES</th>
+  </tr>
+  <tr>
+    <td>EE708</td>
+    <td>Information Theory & Coding</td>
+    <td> 6 </td>
+  </tr>
+  <tr>
+    <td>EE605</td>
+    <td>Error Correcting Codes</td>
+    <td> 6 </td>
+  </tr>
+  <tr>
+    <td>CS736</td>
+    <td>Medical Image Computing</td>
     <td> 6 </td>
   </tr>
 </table>
 
-Total Core Credits : 36
+Total Core Credits : 30   
+Elective Credits I took: 18   
+Total Credits: 48
+
+**Note:** ES250 and HS250 are listed as 3 credit courses however they are PP/NP courses and do not count in your cpi. the 3 credits are just there to tell you how much time per week to spend on it since its a self paced online course. However no one actually studies for the course so it doesnt really matter. These 6 credits also arent included in the 54 credit limit of credits per semester.
+
+ES250 was just a 2 hour exam of MCQs conduted during midsems time and HS250 was just a 2 hour exam of MCQs conducted during endsems time. in both courses, just going though PYQs is enough to pass, for extra safety just briefly read through the notes made based on all the videos. The notes are there on resobin.
 

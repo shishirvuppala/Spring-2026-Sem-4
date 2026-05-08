@@ -1,0 +1,349 @@
+diff --git a/Makefile b/Makefile
+index b262c0a..9e9ff5b 100644
+--- a/Makefile
++++ b/Makefile
+@@ -145,6 +145,9 @@ UPROGS=\
+ 	$U/_logstress\
+ 	$U/_forphan\
+ 	$U/_dorphan\
++	$U/_p1a\
++	$U/_p1b\
++	$U/_p1c\
+ 
+ fs.img: mkfs/mkfs README $(UPROGS)
+ 	mkfs/mkfs fs.img README $(UPROGS)
+diff --git a/kernel/defs.h b/kernel/defs.h
+index 122d9ca..70aeba9 100644
+--- a/kernel/defs.h
++++ b/kernel/defs.h
+@@ -101,6 +101,7 @@ void            yield(void);
+ int             either_copyout(int user_dst, uint64 dst, void *src, uint64 len);
+ int             either_copyin(void *dst, int user_src, uint64 src, uint64 len);
+ void            procdump(void);
++int             pfork(int);
+ 
+ // swtch.S
+ void            swtch(struct context*, struct context*);
+diff --git a/kernel/proc.c b/kernel/proc.c
+index 22a5401..e6ec118 100644
+--- a/kernel/proc.c
++++ b/kernel/proc.c
+@@ -305,6 +305,70 @@ kfork(void)
+   return pid;
+ }
+ 
++struct proc*
++findproc(int pid)
++{
++  struct proc *p;
++
++  for(p = proc; p < &proc[NPROC]; p++){
++    if(p->pid == pid && p->state != UNUSED)
++      return p;
++  }
++
++  return 0;
++}
++
++int
++pfork(int parent_pid)
++{
++  int i, pid;
++  struct proc *np;
++  struct proc *parent;
++  struct proc *cur = myproc();
++
++  //finding the pcb for the parent
++  parent = findproc(parent_pid);
++  if(parent == 0)
++    return -1;
++
++  // Allocate process.
++  if((np = allocproc()) == 0)
++    return -1;
++
++  if(uvmcopy(cur->pagetable, np->pagetable, cur->sz) < 0){
++    freeproc(np);
++    release(&np->lock);
++    return -1;
++  }
++  np->sz = cur->sz;
++
++  *(np->trapframe) = *(cur->trapframe);
++  np->trapframe->a0 = 0;
++
++  // increment reference counts on open file descriptors.
++  for(i = 0; i < NOFILE; i++)
++    if(cur->ofile[i])
++      np->ofile[i] = filedup(cur->ofile[i]);
++  np->cwd = idup(cur->cwd);
++
++  safestrcpy(np->name, cur->name, sizeof(cur->name));
++
++  pid = np->pid;
++
++  release(&np->lock);
++
++  acquire(&wait_lock);
++  //parent change
++  np->parent = parent; 
++  release(&wait_lock);
++
++  acquire(&np->lock);
++  np->state = RUNNABLE;
++  release(&np->lock);
++
++  return pid;
++}
++
+ // Pass p's abandoned children to init.
+ // Caller must hold wait_lock.
+ void
+diff --git a/kernel/syscall.c b/kernel/syscall.c
+index 076d965..cf30ea4 100644
+--- a/kernel/syscall.c
++++ b/kernel/syscall.c
+@@ -101,6 +101,9 @@ extern uint64 sys_unlink(void);
+ extern uint64 sys_link(void);
+ extern uint64 sys_mkdir(void);
+ extern uint64 sys_close(void);
++extern uint64 sys_tfork(void);
++extern uint64 sys_tfork2(void);
++extern uint64 sys_getppid(void);
+ 
+ // An array mapping syscall numbers from syscall.h
+ // to the function that handles the system call.
+@@ -126,6 +129,9 @@ static uint64 (*syscalls[])(void) = {
+ [SYS_link]    sys_link,
+ [SYS_mkdir]   sys_mkdir,
+ [SYS_close]   sys_close,
++[SYS_tfork]   sys_tfork,
++[SYS_tfork2]  sys_tfork2,
++[SYS_getppid] sys_getppid,
+ };
+ 
+ void
+diff --git a/kernel/syscall.h b/kernel/syscall.h
+index 3dd926d..51d8c5f 100644
+--- a/kernel/syscall.h
++++ b/kernel/syscall.h
+@@ -20,3 +20,6 @@
+ #define SYS_link   19
+ #define SYS_mkdir  20
+ #define SYS_close  21
++#define SYS_tfork  22
++#define SYS_getppid 23
++#define SYS_tfork2 24
+diff --git a/kernel/sysproc.c b/kernel/sysproc.c
+index 419e727..840ca5e 100644
+--- a/kernel/sysproc.c
++++ b/kernel/sysproc.c
+@@ -107,3 +107,68 @@ sys_uptime(void)
+   release(&tickslock);
+   return xticks;
+ }
++
++uint64
++sys_tfork(void)
++{
++  int n;
++  uint64 pids;
++  struct proc* p = myproc();
++
++  argint(0, &n);
++  if (n < 0) return -1;
++
++  argaddr(1, &pids);
++
++  for (int i = 0; i < n; i++) {
++    int pid = kfork();
++    if (pid < 0) return -1;
++    if (pid == 0) return 0;
++
++    // read copyout
++    if (copyout(p->pagetable, pids + i * sizeof(int), (char*)&pid,
++                sizeof(int)) < 0)
++      return -1;
++  }
++
++  return n;
++}
++
++uint64
++sys_tfork2(void)
++{
++  int n;
++  uint64 pids;
++  struct proc* p = myproc();
++
++  argint(0, &n);
++  if (n < 0) return -1;
++
++  argaddr(1, &pids);
++
++  int curr_parent = p->pid;
++  for (int i = 0; i < n; i++) {
++    int pid = pfork(curr_parent);
++    if (pid < 0) return -1;
++    if (pid == 0) return 0;
++
++    // read copyout
++    if (copyout(p->pagetable, pids + i * sizeof(int), (char*)&pid,
++                sizeof(int)) < 0)
++      return -1;
++
++    // setting new child's pid for next parent
++    curr_parent = pid;
++  }
++
++  return n;
++}
++
++uint64
++sys_getppid(void)
++{
++  struct proc* p = myproc();
++  if (p->parent) return p->parent->pid;
++
++  return -1;
++}
+diff --git a/user/p1a.c b/user/p1a.c
+new file mode 100644
+index 0000000..bff5ae8
+--- /dev/null
++++ b/user/p1a.c
+@@ -0,0 +1,32 @@
++#include "kernel/types.h"
++#include "user/user.h"
++
++int
++main(int argc, char* argv[])
++{
++    int N = 4, i;
++    if (argc > 1) N = atoi(argv[1]);
++
++    int pids[N];
++    int parent_id = getpid();
++
++    int ret = tfork(N, pids);
++    if (ret == 0) {  // CHILD
++        int child_id = getpid();
++        pause(child_id % 10);
++
++        printf("child: pid=%d ppid=%d\n", child_id, parent_id);
++
++        exit(0);
++    }
++
++    // ORIGINAL PARENT
++    for (i = 0; i < N; i++) wait(0);
++
++    printf("parent: pid=%d\n", parent_id);
++
++    printf("Parent Process Summary:\n");
++    for (i = 0; i < N; i++) printf("  level %d -> pid %d\n", 1, pids[i]);
++
++    exit(0);
++}
+diff --git a/user/p1b.c b/user/p1b.c
+new file mode 100644
+index 0000000..52dc46e
+--- /dev/null
++++ b/user/p1b.c
+@@ -0,0 +1,33 @@
++#include "kernel/types.h"
++#include "user/user.h"
++
++int
++main(int argc, char* argv[])
++{
++    int N = 4, i;
++    if (argc > 1) N = atoi(argv[1]);
++
++    int pids[N];
++
++    int ret = tfork(N, pids);
++    if (ret == 0) {  // CHILD
++        int child_id = getpid();
++        int parent_id = getppid();
++
++        pause(child_id % 10);
++
++        printf("child: pid=%d ppid=%d\n", child_id, parent_id);
++
++        exit(0);
++    }
++
++    // ORIGINAL PARENT
++    for (i = 0; i < N; i++) wait(0);
++
++    printf("parent: pid=%d\n", getpid());
++
++    printf("Parent Process Summary:\n");
++    for (i = 0; i < N; i++) printf("  level %d -> pid %d\n", 1, pids[i]);
++
++    exit(0);
++}
+diff --git a/user/p1c.c b/user/p1c.c
+new file mode 100644
+index 0000000..d152f76
+--- /dev/null
++++ b/user/p1c.c
+@@ -0,0 +1,31 @@
++#include "kernel/types.h"
++#include "user/user.h"
++
++int
++main(int argc, char* argv[])
++{
++    int N = 4;
++    if (argc > 1) N = atoi(argv[1]);
++
++    int pids[N];
++
++    int ret = tfork2(N, pids);
++    if (ret == 0) {  // CHILD; waits for its child
++        wait(0);
++
++        printf("child: pid=%d ppid=%d\n", getpid(), getppid());
++
++        exit(0);
++    }
++
++    // PARENT; waits for child
++    wait(0);
++
++    printf("parent: pid=%d\n", getpid());
++
++    printf("Spawned Chain Summary:\n");
++    for (int i = 0; i < N; i++)
++        printf("  level %d -> pid %d\n", i + 1, pids[i]);
++
++    exit(0);
++}
+diff --git a/user/user.h b/user/user.h
+index ac84de9..326cdbf 100644
+--- a/user/user.h
++++ b/user/user.h
+@@ -25,6 +25,10 @@ char* sys_sbrk(int,int);
+ int pause(int);
+ int uptime(void);
+ 
++int getppid(void);
++int tfork(int n, int *pids);
++int tfork2(int n,int *pids);
++
+ // ulib.c
+ int stat(const char*, struct stat*);
+ char* strcpy(char*, const char*);
+diff --git a/user/usys.pl b/user/usys.pl
+index c5d4c3a..816a9ae 100755
+--- a/user/usys.pl
++++ b/user/usys.pl
+@@ -42,3 +42,6 @@ entry("getpid");
+ entry("sbrk");
+ entry("pause");
+ entry("uptime");
++entry("getppid");
++entry("tfork");
++entry("tfork2");

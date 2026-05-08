@@ -1,0 +1,540 @@
+diff --git a/Makefile b/Makefile
+index b262c0a..94965f2 100644
+--- a/Makefile
++++ b/Makefile
+@@ -145,9 +145,18 @@ UPROGS=\
+ 	$U/_logstress\
+ 	$U/_forphan\
+ 	$U/_dorphan\
+-
+-fs.img: mkfs/mkfs README $(UPROGS)
+-	mkfs/mkfs fs.img README $(UPROGS)
++	$U/_p1\
++	$U/_p2\
++	$U/_p3\
++	$U/_p4\
++	$U/_p5\
++	$U/_p6\
++	$U/_p7a\
++	$U/_p7b\
++	$U/_p7c\
++
++fs.img: mkfs/mkfs README sample1.txt sample2.txt $(UPROGS)
++	mkfs/mkfs fs.img README sample1.txt sample2.txt $(UPROGS)
+ 
+ -include kernel/*.d user/*.d
+ 
+diff --git a/kernel/proc.c b/kernel/proc.c
+index 22a5401..c6ce50c 100644
+--- a/kernel/proc.c
++++ b/kernel/proc.c
+@@ -124,6 +124,7 @@ allocproc(void)
+ found:
+   p->pid = allocpid();
+   p->state = USED;
++  p->child_count = 0;
+ 
+   // Allocate a trapframe page.
+   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
+@@ -169,6 +170,7 @@ freeproc(struct proc *p)
+   p->killed = 0;
+   p->xstate = 0;
+   p->state = UNUSED;
++  p->child_count = 0;
+ }
+ 
+ // Create a user page table for a given process, with no user memory,
+@@ -302,6 +304,13 @@ kfork(void)
+   np->state = RUNNABLE;
+   release(&np->lock);
+ 
++  printf("fork: created child with pid: %d\n", pid);
++  p->child_count++;
++
++  np->strace_buf_retval = 0;
++  np->strace_buf_syscall = 0;
++  np->strace_size = 0;
++
+   return pid;
+ }
+ 
+@@ -397,6 +406,7 @@ kwait(uint64 addr)
+           freeproc(pp);
+           release(&pp->lock);
+           release(&wait_lock);
++          p->child_count--;
+           return pid;
+         }
+         release(&pp->lock);
+@@ -688,3 +698,50 @@ procdump(void)
+     printf("\n");
+   }
+ }
++
++
++void sys_knockknock(void) {
++  printf("[pid %d] Who's there?\n", myproc()->pid);
++}
++
++void sys_getProcessStates(void) {
++  struct proc *p;
++  for(p = proc; p < &proc[NPROC]; p++){
++    if(p->state == UNUSED)
++      continue;
++    char *state;
++    switch(p->state) {
++      case SLEEPING: state = "SLEEPING"; break;
++      case RUNNABLE: state = "RUNNABLE"; break;
++      case RUNNING:  state = "RUNNING";  break;
++      case ZOMBIE:   state = "ZOMBIE";   break;
++      default:      state = "UNKNOWN";  break;
++    }
++    printf("Process %d was found in %s state\n", p->pid, state);
++  }
++}
++
++
++void sys_areYouThere() {
++  int pid;
++  argint(0, &pid);
++  for (struct proc *p = proc; p < &proc[NPROC]; p++) {
++    if(p->pid == pid) {
++      char *state;
++      switch(p->state) {
++        case SLEEPING: state = "SLEEPING"; break;
++        case RUNNABLE: state = "RUNNABLE"; break;
++        case RUNNING:  state = "RUNNING";  break;
++        case ZOMBIE:   state = "ZOMBIE";   break;
++        default:      state = "UNKNOWN";  break;
++      }
++      printf("%d has been found in %s state\n", pid, state);
++      return;
++    }
++  }
++  printf("%d has gone missing\n", pid);
++}
++
++int sys_getChildCount() {
++  return myproc()->child_count;
++}
+diff --git a/kernel/proc.h b/kernel/proc.h
+index d021857..637c1da 100644
+--- a/kernel/proc.h
++++ b/kernel/proc.h
+@@ -104,4 +104,9 @@ struct proc {
+   struct file *ofile[NOFILE];  // Open files
+   struct inode *cwd;           // Current directory
+   char name[16];               // Process name (debugging)
++
++  int child_count;             // Number of children processes
++  int* strace_buf_syscall;          // Buffer to store process trace info
++  int* strace_buf_retval;              // Buffer to store process trace info
++  int strace_size;            // Size of the strace buffer
+ };
+diff --git a/kernel/syscall.c b/kernel/syscall.c
+index 076d965..47b4009 100644
+--- a/kernel/syscall.c
++++ b/kernel/syscall.c
+@@ -101,6 +101,12 @@ extern uint64 sys_unlink(void);
+ extern uint64 sys_link(void);
+ extern uint64 sys_mkdir(void);
+ extern uint64 sys_close(void);
++extern uint64 sys_knockknock(void);
++extern uint64 sys_getProcessStates(void);
++extern uint64 sys_areYouThere(void);
++extern uint64 sys_getChildCount(void);
++extern uint64 sys_strace_start(void);
++extern uint64 sys_strace_end(void);
+ 
+ // An array mapping syscall numbers from syscall.h
+ // to the function that handles the system call.
+@@ -126,6 +132,12 @@ static uint64 (*syscalls[])(void) = {
+ [SYS_link]    sys_link,
+ [SYS_mkdir]   sys_mkdir,
+ [SYS_close]   sys_close,
++[SYS_knockknock] sys_knockknock,
++[SYS_getProcessStates] sys_getProcessStates,
++[SYS_areYouThere] sys_areYouThere,
++[SYS_getChildCount] sys_getChildCount,
++[SYS_strace_start] sys_strace_start,
++[SYS_strace_end]   sys_strace_end,
+ };
+ 
+ void
+@@ -139,6 +151,10 @@ syscall(void)
+     // Use num to lookup the system call function for num, call it,
+     // and store its return value in p->trapframe->a0
+     p->trapframe->a0 = syscalls[num]();
++    if(p->strace_buf_syscall) {
++      p->strace_buf_syscall[p->strace_size] = num;
++      p->strace_buf_retval[p->strace_size++] = p->trapframe->a0;
++    } 
+   } else {
+     printf("%d %s: unknown sys call %d\n",
+             p->pid, p->name, num);
+diff --git a/kernel/syscall.h b/kernel/syscall.h
+index 3dd926d..8b75527 100644
+--- a/kernel/syscall.h
++++ b/kernel/syscall.h
+@@ -20,3 +20,9 @@
+ #define SYS_link   19
+ #define SYS_mkdir  20
+ #define SYS_close  21
++#define SYS_knockknock 22
++#define SYS_getProcessStates 23
++#define SYS_areYouThere 24
++#define SYS_getChildCount 25
++#define SYS_strace_start 26
++#define SYS_strace_end 27
+diff --git a/kernel/sysproc.c b/kernel/sysproc.c
+index 419e727..5d43f57 100644
+--- a/kernel/sysproc.c
++++ b/kernel/sysproc.c
+@@ -107,3 +107,34 @@ sys_uptime(void)
+   release(&tickslock);
+   return xticks;
+ }
++
++uint64
++sys_strace_start(void)
++{
++  struct proc* p = myproc();
++  p->strace_buf_syscall = kalloc();
++  p->strace_buf_retval = kalloc();
++  p->strace_size = 0;
++  return 0;
++}
++
++uint64
++sys_strace_end(void)
++{
++  struct proc* p = myproc();
++  if(p->strace_buf_syscall == 0 || p->strace_buf_retval == 0) {
++    return -1;
++  }
++
++  printf("Syscall Trace for PID %d:\n", p->pid);
++  for(int i = 0; i < p->strace_size; i++) {
++    printf("  Syscall %d returned %d\n", p->strace_buf_syscall[i], p->strace_buf_retval[i]);
++  }
++
++  kfree((void*)p->strace_buf_syscall);
++  kfree((void*)p->strace_buf_retval);
++  p->strace_buf_syscall = 0;
++  p->strace_buf_retval = 0;
++  p->strace_size = 0;
++  return 0;
++} 
+\ No newline at end of file
+diff --git a/sample1.txt b/sample1.txt
+new file mode 100644
+index 0000000..997ef2b
+--- /dev/null
++++ b/sample1.txt
+@@ -0,0 +1 @@
++hello cs236!
+diff --git a/sample2.txt b/sample2.txt
+new file mode 100644
+index 0000000..73681e7
+--- /dev/null
++++ b/sample2.txt
+@@ -0,0 +1 @@
++hello from sample2!
+diff --git a/user/p1.c b/user/p1.c
+new file mode 100644
+index 0000000..a815c96
+--- /dev/null
++++ b/user/p1.c
+@@ -0,0 +1,30 @@
++#include "kernel/types.h"
++#include "kernel/stat.h"
++#include "user/user.h"
++#include "kernel/fcntl.h"
++
++int main(int argc, char* argv[]) {
++    if (argc != 2) {
++        printf("Usage: p1 <filename>\n");
++        exit(1);
++    }
++
++    // Write your code here
++    int pid = fork();
++    if (pid == 0) {
++      // child
++      printf("[child]: my_pid: %d, file_content: ", getpid());
++      int ret;
++      ret = close(0);
++      if (ret < 0) exit(1);
++      ret = open(argv[1], O_RDONLY);
++      if (ret < 0) exit(1);
++      char *args[] = {"cat", 0};
++      exec(args[0], args);
++      printf("exec failed\n");
++      exit(1);
++    }
++    wait(0);
++    printf("[parent]: my_pid: %d, child_pid: %d\n", getpid(), pid);
++    exit(0);
++}
+diff --git a/user/p2.c b/user/p2.c
+new file mode 100644
+index 0000000..ac499b6
+--- /dev/null
++++ b/user/p2.c
+@@ -0,0 +1,20 @@
++#include "kernel/types.h"
++#include "kernel/stat.h"
++#include "user/user.h"
++
++int
++main(int argc, char *argv[])
++{
++    int pid = fork();
++    
++    if(pid < 0){
++        printf("Fork failed\n");
++        exit(1);
++    }
++
++    if(pid > 0){
++        printf("[parent]: my_pid: %d, child_pid: %d\n", getpid(), pid);
++    }
++
++    exit(0);
++}
+\ No newline at end of file
+diff --git a/user/p3.c b/user/p3.c
+new file mode 100644
+index 0000000..f1d7592
+--- /dev/null
++++ b/user/p3.c
+@@ -0,0 +1,7 @@
++#include "kernel/types.h"
++#include "user/user.h"
++
++int main() {
++    knockknock();
++    exit(0);
++}
+diff --git a/user/p4.c b/user/p4.c
+new file mode 100644
+index 0000000..2751fca
+--- /dev/null
++++ b/user/p4.c
+@@ -0,0 +1,31 @@
++#include "kernel/types.h"
++#include "kernel/stat.h"
++#include "user/user.h"
++
++int main() {
++    int i, pid;
++
++    printf("Parent pid: %d\n", getpid());
++
++    for (i = 0; i < 3; i++) {
++        pid = fork();
++        if (pid == 0) {
++            pause(10);
++            exit(0);
++        }
++    }
++
++    pause(5);
++    getProcessStates();
++    pause(30);
++
++    printf("\n=== Process states after exiting ===\n");
++    getProcessStates();
++
++    for (i = 0; i < 3; i++) wait(0);
++
++    printf("\n=== Process states reaping ===\n");
++    getProcessStates();
++
++    exit(0);
++}
+diff --git a/user/p5.c b/user/p5.c
+new file mode 100644
+index 0000000..0ac6f8a
+--- /dev/null
++++ b/user/p5.c
+@@ -0,0 +1,25 @@
++#include "kernel/types.h"
++#include "kernel/stat.h"
++#include "user/user.h"
++
++int main() {
++    int pid = fork();
++    if (pid == 0) {
++        pause(10);
++        exit(0);
++    }
++
++    printf("Checking child pid %d\n", pid);
++    areYouThere(pid);
++
++    int mypid = getpid();
++    printf("\nMy PID is %d\n", mypid);
++
++    printf("Checking my own PID:\n");
++    areYouThere(mypid);
++
++    printf("\nChecking a non-existent PID (50)\n");
++    areYouThere(50);
++
++    exit(0);
++}
+diff --git a/user/p6.c b/user/p6.c
+new file mode 100644
+index 0000000..754a4ef
+--- /dev/null
++++ b/user/p6.c
+@@ -0,0 +1,32 @@
++#include "kernel/types.h"
++#include "kernel/stat.h"
++#include "user/user.h"
++
++int main() {
++    int i, pid;
++
++    printf("Initial child count: %d\n", getChildCount());
++
++    for (i = 0; i < 3; i++) {
++        pid = fork();
++        if (pid == 0) exit(0);
++    }
++
++    printf("Child count after 3 forks: %d\n", getChildCount());
++
++    for (i = 0; i < 3; i++) wait(0);
++
++    printf("Child count after reaping all childrens: %d\n", getChildCount());
++
++    pid = fork();
++    if (pid == 0) exit(0);
++
++    printf("Child count after 4th fork: %d\n", getChildCount());
++
++    wait(0);
++    wait(0);
++
++    printf("Child count after reaping 4th child: %d\n", getChildCount());
++
++    exit(0);
++}
+diff --git a/user/p7a.c b/user/p7a.c
+new file mode 100644
+index 0000000..20b9e72
+--- /dev/null
++++ b/user/p7a.c
+@@ -0,0 +1,20 @@
++#include "kernel/types.h"
++#include "kernel/stat.h"
++#include "user/user.h"
++
++int main(int argc, char* argv[]) {
++    //   int fd, i;
++
++    strace_start();
++
++    // printf("Creating a pipe\n");
++    int p[2];
++    if (pipe(p) < 0) {
++        printf("pipe error\n");
++        exit(1);
++    }
++
++    getpid();
++    strace_end();
++    exit(0);
++}
+diff --git a/user/p7b.c b/user/p7b.c
+new file mode 100644
+index 0000000..3c66217
+--- /dev/null
++++ b/user/p7b.c
+@@ -0,0 +1,23 @@
++#include "kernel/types.h"
++#include "kernel/stat.h"
++#include "user/user.h"
++
++int main(int argc, char* argv[]) {
++    //   int fd, i;
++
++    strace_start();
++
++    // printf("Creating a pipe\n");
++    int p[2];
++    if (pipe(p) < 0) {
++        printf("pipe error\n");
++        exit(1);
++    }
++
++    getpid();
++    if (fork() == 0) exit(0);
++
++    wait(0);
++    strace_end();
++    exit(0);
++}
+diff --git a/user/p7c.c b/user/p7c.c
+new file mode 100644
+index 0000000..c78d86d
+--- /dev/null
++++ b/user/p7c.c
+@@ -0,0 +1,23 @@
++#include "kernel/types.h"
++#include "kernel/stat.h"
++#include "user/user.h"
++
++int main(int argc, char* argv[]) {
++    //   int fd, i;
++
++    strace_start();
++
++    // printf("Creating a pipe\n");
++    int p[2];
++    if (pipe(p) < 0) {
++        printf("pipe error\n");
++        exit(1);
++    }
++
++    getpid();
++    if (fork() != 0) exit(0);
++
++    wait(0);
++    //   strace_end();
++    exit(0);
++}
+diff --git a/user/user.h b/user/user.h
+index ac84de9..1336121 100644
+--- a/user/user.h
++++ b/user/user.h
+@@ -24,6 +24,12 @@ int getpid(void);
+ char* sys_sbrk(int,int);
+ int pause(int);
+ int uptime(void);
++void knockknock(void);
++void getProcessStates(void);
++void areYouThere(int);
++int getChildCount(void);
++int strace_start(void);
++int strace_end(void);
+ 
+ // ulib.c
+ int stat(const char*, struct stat*);
+diff --git a/user/usys.pl b/user/usys.pl
+index c5d4c3a..2386955 100755
+--- a/user/usys.pl
++++ b/user/usys.pl
+@@ -42,3 +42,9 @@ entry("getpid");
+ entry("sbrk");
+ entry("pause");
+ entry("uptime");
++entry("knockknock");
++entry("getProcessStates");
++entry("areYouThere");
++entry("getChildCount");
++entry("strace_start");
++entry("strace_end");
+\ No newline at end of file

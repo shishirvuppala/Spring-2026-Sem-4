@@ -1,0 +1,8 @@
+Part 2: Booting a Simple Assembly Program
+-----------------------------------------
+
+* Compile the asm file as
+	$ nasm -f bin -o boot_sector1.bin boot_sector1.asm
+
+* Boot the system with bin file
+	$ qemu-system-i386 boot_sector1.bin

@@ -1,0 +1,1089 @@
+diff --git a/Makefile b/Makefile
+index b262c0a..5fed9ab 100644
+--- a/Makefile
++++ b/Makefile
+@@ -28,7 +28,8 @@ OBJS = \
+   $K/sysfile.o \
+   $K/kernelvec.o \
+   $K/plic.o \
+-  $K/virtio_disk.o
++  $K/virtio_disk.o \
++  $K/spawn.o
+ 
+ # riscv64-unknown-elf- or riscv64-linux-gnu-
+ # perhaps in /opt/riscv/bin
+@@ -145,6 +146,17 @@ UPROGS=\
+ 	$U/_logstress\
+ 	$U/_forphan\
+ 	$U/_dorphan\
++	$U/_p1a\
++	$U/_p1b\
++	$U/_p1c\
++	$U/_p1d\
++	$U/_p2a\
++	$U/_p2b\
++	$U/_p2c\
++	$U/_p3a\
++	$U/_p3b\
++	$U/_p3c\
++	$U/_p3d\
+ 
+ fs.img: mkfs/mkfs README $(UPROGS)
+ 	mkfs/mkfs fs.img README $(UPROGS)
+diff --git a/kernel/defs.h b/kernel/defs.h
+index 122d9ca..b2cc9c2 100644
+--- a/kernel/defs.h
++++ b/kernel/defs.h
+@@ -24,6 +24,8 @@ void            consputc(int);
+ 
+ // exec.c
+ int             kexec(char*, char**);
++int             flags2perm(int);
++int             loadseg(pagetable_t, uint64, struct inode *, uint, uint);
+ 
+ // file.c
+ struct file*    filealloc(void);
+@@ -78,6 +80,8 @@ void            panic(char*) __attribute__((noreturn));
+ void            printfinit(void);
+ 
+ // proc.c
++struct proc*    allocproc(void);
++void            freeproc(struct proc *);
+ int             cpuid(void);
+ void            kexit(int);
+ int             kfork(void);
+@@ -119,6 +123,9 @@ void            releasesleep(struct sleeplock*);
+ int             holdingsleep(struct sleeplock*);
+ void            initsleeplock(struct sleeplock*, char*);
+ 
++// spawn.c
++int             kspawn(char *, char **);
++
+ // string.c
+ int             memcmp(const void*, const void*, uint);
+ void*           memmove(void*, const void*, uint);
+diff --git a/kernel/exec.c b/kernel/exec.c
+index 08bfbe8..bd3bc6c 100644
+--- a/kernel/exec.c
++++ b/kernel/exec.c
+@@ -7,8 +7,6 @@
+ #include "defs.h"
+ #include "elf.h"
+ 
+-static int loadseg(pde_t *, uint64, struct inode *, uint, uint);
+-
+ // map ELF permissions to PTE permission bits.
+ int flags2perm(int flags)
+ {
+@@ -151,7 +149,7 @@ kexec(char *path, char **argv)
+ // va must be page-aligned
+ // and the pages from va to va+sz must already be mapped.
+ // Returns 0 on success, -1 on failure.
+-static int
++int
+ loadseg(pagetable_t pagetable, uint64 va, struct inode *ip, uint offset, uint sz)
+ {
+   uint i, n;
+diff --git a/kernel/memlayout.h b/kernel/memlayout.h
+index 9bc9424..81da457 100644
+--- a/kernel/memlayout.h
++++ b/kernel/memlayout.h
+@@ -57,3 +57,5 @@
+ //   TRAPFRAME (p->trapframe, used by the trampoline)
+ //   TRAMPOLINE (the same page as in the kernel)
+ #define TRAPFRAME (TRAMPOLINE - PGSIZE)
++
++#define FASTUPTIME_PAGE (TRAPFRAME - PGSIZE)
+diff --git a/kernel/proc.c b/kernel/proc.c
+index 22a5401..2ba2961 100644
+--- a/kernel/proc.c
++++ b/kernel/proc.c
+@@ -16,10 +16,11 @@ int nextpid = 1;
+ struct spinlock pid_lock;
+ 
+ extern void forkret(void);
+-static void freeproc(struct proc *p);
+ 
+ extern char trampoline[]; // trampoline.S
+ 
++extern uint64 fastuptime_page_addr;
++
+ // helps ensure that wakeups of wait()ing
+ // parents are not lost. helps obey the
+ // memory model when using p->parent.
+@@ -106,7 +107,7 @@ allocpid()
+ // If found, initialize state required to run in the kernel,
+ // and return with p->lock held.
+ // If there are no free procs, or a memory allocation fails, return 0.
+-static struct proc*
++struct proc*
+ allocproc(void)
+ {
+   struct proc *p;
+@@ -152,7 +153,7 @@ found:
+ // free a proc structure and the data hanging from it,
+ // including user pages.
+ // p->lock must be held.
+-static void
++void
+ freeproc(struct proc *p)
+ {
+   if(p->trapframe)
+@@ -169,6 +170,7 @@ freeproc(struct proc *p)
+   p->killed = 0;
+   p->xstate = 0;
+   p->state = UNUSED;
++  p->pagefaults = 0;
+ }
+ 
+ // Create a user page table for a given process, with no user memory,
+@@ -202,6 +204,14 @@ proc_pagetable(struct proc *p)
+     return 0;
+   }
+ 
++  if (mappages(pagetable, FASTUPTIME_PAGE, PGSIZE, fastuptime_page_addr, PTE_R | PTE_U) < 0) {
++    uvmunmap(pagetable, TRAMPOLINE, 1, 0);
++    uvmunmap(pagetable, TRAPFRAME, 1, 0);
++    uvmfree(pagetable, 0);
++    return 0;
++  }
++
++
+   return pagetable;
+ }
+ 
+@@ -212,6 +222,7 @@ proc_freepagetable(pagetable_t pagetable, uint64 sz)
+ {
+   uvmunmap(pagetable, TRAMPOLINE, 1, 0);
+   uvmunmap(pagetable, TRAPFRAME, 1, 0);
++  uvmunmap(pagetable, FASTUPTIME_PAGE, 1, 0);
+   uvmfree(pagetable, sz);
+ }
+ 
+diff --git a/kernel/proc.h b/kernel/proc.h
+index d021857..dd020c4 100644
+--- a/kernel/proc.h
++++ b/kernel/proc.h
+@@ -104,4 +104,5 @@ struct proc {
+   struct file *ofile[NOFILE];  // Open files
+   struct inode *cwd;           // Current directory
+   char name[16];               // Process name (debugging)
++  uint64 pagefaults;           // Number of page faults
+ };
+diff --git a/kernel/spawn.c b/kernel/spawn.c
+new file mode 100644
+index 0000000..e2e1d86
+--- /dev/null
++++ b/kernel/spawn.c
+@@ -0,0 +1,150 @@
++#include "types.h"
++#include "param.h"
++#include "memlayout.h"
++#include "riscv.h"
++#include "spinlock.h"
++#include "proc.h"
++#include "defs.h"
++#include "elf.h"
++
++extern struct spinlock wait_lock;
++
++//
++// the implementation of the spawn() system call
++//
++int
++kspawn(char *path, char **argv)
++{
++  char *s, *last;
++  int i, off;
++  uint64 argc, sp, ustack[MAXARG], stackbase;
++  struct elfhdr elf;
++  struct inode *ip;
++  struct proghdr ph;
++  struct proc *p = 0, *mp = myproc();
++
++  begin_op();
++
++  // Open the executable file.
++  if((ip = namei(path)) == 0){
++    end_op();
++    return -1;
++  }
++  ilock(ip);
++
++  // Read the ELF header.
++  if(readi(ip, 0, (uint64)&elf, 0, sizeof(elf)) != sizeof(elf))
++    goto bad;
++
++  // Is this really an ELF file?
++  if(elf.magic != ELF_MAGIC)
++    goto bad;
++
++  if((p = allocproc()) == 0)
++    goto bad;
++  
++  release(&p->lock);
++
++  // Load program into memory.
++  for(i=0, off=elf.phoff; i<elf.phnum; i++, off+=sizeof(ph)){
++    if(readi(ip, 0, (uint64)&ph, off, sizeof(ph)) != sizeof(ph))
++      goto bad;
++    if(ph.type != ELF_PROG_LOAD)
++      continue;
++    if(ph.memsz < ph.filesz)
++      goto bad;
++    if(ph.vaddr + ph.memsz < ph.vaddr)
++      goto bad;
++    if(ph.vaddr % PGSIZE != 0)
++      goto bad;
++    uint64 sz1;
++    if((sz1 = uvmalloc(p->pagetable, p->sz, ph.vaddr + ph.memsz, flags2perm(ph.flags))) == 0)
++      goto bad;
++    p->sz = sz1;
++    if(loadseg(p->pagetable, ph.vaddr, ip, ph.off, ph.filesz) < 0)
++      goto bad;
++  }
++  iunlockput(ip);
++  end_op();
++  ip = 0;
++
++  // Allocate some pages at the next page boundary.
++  // Make the first inaccessible as a stack guard.
++  // Use the rest as the user stack.
++  p->sz = PGROUNDUP(p->sz);
++  uint64 sz1;
++  if((sz1 = uvmalloc(p->pagetable, p->sz, p->sz + (USERSTACK+1)*PGSIZE, PTE_W)) == 0)
++    goto bad;
++  p->sz = sz1;
++  uvmclear(p->pagetable, p->sz-(USERSTACK+1)*PGSIZE);
++  sp = p->sz;
++  stackbase = sp - USERSTACK*PGSIZE;
++
++  // Copy argument strings into new stack, remember their
++  // addresses in ustack[].
++  for(argc = 0; argv[argc]; argc++) {
++    if(argc >= MAXARG)
++      goto bad;
++    sp -= strlen(argv[argc]) + 1;
++    sp -= sp % 16; // riscv sp must be 16-byte aligned
++    if(sp < stackbase)
++      goto bad;
++    if(copyout(p->pagetable, sp, argv[argc], strlen(argv[argc]) + 1) < 0)
++      goto bad;
++    ustack[argc] = sp;
++  }
++  ustack[argc] = 0;
++
++  // push a copy of ustack[], the array of argv[] pointers.
++  sp -= (argc+1) * sizeof(uint64);
++  sp -= sp % 16;
++  if(sp < stackbase)
++    goto bad;
++  if(copyout(p->pagetable, sp, (char *)ustack, (argc+1)*sizeof(uint64)) < 0)
++    goto bad;
++
++  // a0 and a1 contain arguments to user main(argc, argv)
++  *(p->trapframe) = *(mp->trapframe);
++  p->trapframe->a0 = argc;
++  p->trapframe->a1 = sp;
++
++  // Save program name for debugging.
++  for(last=s=path; *s; s++)
++    if(*s == '/')
++      last = s+1;
++  safestrcpy(p->name, last, sizeof(p->name));
++    
++  // Commit to the user image.
++  p->trapframe->epc = elf.entry;  // initial program counter = ulib.c:start()
++  p->trapframe->sp = sp; // initial stack pointer
++
++  // increment reference counts on open file descriptors.
++  for(i = 0; i < NOFILE; i++)
++    if(mp->ofile[i])
++      p->ofile[i] = filedup(mp->ofile[i]);
++  p->cwd = idup(mp->cwd);
++
++  acquire(&wait_lock);
++  p->parent = mp;
++  release(&wait_lock);
++
++  acquire(&p->lock);
++  int pid = p->pid;
++  p->state = RUNNABLE;
++  release(&p->lock);
++
++  return pid;
++
++ bad:
++  if(p) {
++    if (!holding(&p->lock))
++      acquire(&p->lock);
++    freeproc(p);
++    release(&p->lock);
++  }
++  if(ip){
++    iunlockput(ip);
++    end_op();
++  }
++  return -1;
++}
+diff --git a/kernel/syscall.c b/kernel/syscall.c
+index 076d965..3ecd4c6 100644
+--- a/kernel/syscall.c
++++ b/kernel/syscall.c
+@@ -101,6 +101,10 @@ extern uint64 sys_unlink(void);
+ extern uint64 sys_link(void);
+ extern uint64 sys_mkdir(void);
+ extern uint64 sys_close(void);
++extern uint64 sys_get_pagefaults(void);
++extern uint64 sys_va2pa(void);
++extern uint64 sys_sbrklazy_size(void);
++extern uint64 sys_spawn(void);
+ 
+ // An array mapping syscall numbers from syscall.h
+ // to the function that handles the system call.
+@@ -126,6 +130,10 @@ static uint64 (*syscalls[])(void) = {
+ [SYS_link]    sys_link,
+ [SYS_mkdir]   sys_mkdir,
+ [SYS_close]   sys_close,
++[SYS_get_pagefaults] sys_get_pagefaults,
++[SYS_va2pa]   sys_va2pa,
++[SYS_sbrklazy_size] sys_sbrklazy_size,
++[SYS_spawn]   sys_spawn,
+ };
+ 
+ void
+diff --git a/kernel/syscall.h b/kernel/syscall.h
+index 3dd926d..ffaa164 100644
+--- a/kernel/syscall.h
++++ b/kernel/syscall.h
+@@ -20,3 +20,7 @@
+ #define SYS_link   19
+ #define SYS_mkdir  20
+ #define SYS_close  21
++#define SYS_get_pagefaults  22
++#define SYS_va2pa 23
++#define SYS_sbrklazy_size 24
++#define SYS_spawn 25
+diff --git a/kernel/sysfile.c b/kernel/sysfile.c
+index d8234ce..9bd5d05 100644
+--- a/kernel/sysfile.c
++++ b/kernel/sysfile.c
+@@ -503,3 +503,49 @@ sys_pipe(void)
+   }
+   return 0;
+ }
++
++uint64
++sys_spawn(void)
++{
++  char path[MAXPATH], *argv[MAXARG];
++  int i;
++  uint64 uargv, uarg;
++
++  argaddr(1, &uargv);
++  if (uargv == 0) {
++    return kfork();
++  }
++  if(argstr(0, path, MAXPATH) < 0) {
++    return -1;
++  }
++  memset(argv, 0, sizeof(argv));
++  for(i=0;; i++){
++    if(i >= NELEM(argv)){
++      goto bad;
++    }
++    if(fetchaddr(uargv+sizeof(uint64)*i, (uint64*)&uarg) < 0){
++      goto bad;
++    }
++    if(uarg == 0){
++      argv[i] = 0;
++      break;
++    }
++    argv[i] = kalloc();
++    if(argv[i] == 0)
++      goto bad;
++    if(fetchstr(uarg, argv[i], PGSIZE) < 0)
++      goto bad;
++  }
++
++  int ret = kspawn(path, argv);
++
++  for(i = 0; i < NELEM(argv) && argv[i] != 0; i++)
++    kfree(argv[i]);
++
++  return ret;
++
++ bad:
++  for(i = 0; i < NELEM(argv) && argv[i] != 0; i++)
++    kfree(argv[i]);
++  return -1;
++}
+diff --git a/kernel/sysproc.c b/kernel/sysproc.c
+index 419e727..f809a67 100644
+--- a/kernel/sysproc.c
++++ b/kernel/sysproc.c
+@@ -7,6 +7,8 @@
+ #include "proc.h"
+ #include "vm.h"
+ 
++extern uint sbrklazy_size;
++
+ uint64
+ sys_exit(void)
+ {
+@@ -107,3 +109,41 @@ sys_uptime(void)
+   release(&tickslock);
+   return xticks;
+ }
++
++uint64
++sys_get_pagefaults(void)
++{
++  return myproc()->pagefaults;
++}
++
++uint64
++sys_va2pa(void) {
++  uint64 va;
++  struct proc *p = myproc();
++  pte_t *pte;
++  uint64 pa;
++  argaddr(0, &va);
++  pte = walk(p->pagetable, va, 0);
++  if(pte == 0)
++    return 0;
++
++  if((*pte & PTE_V) == 0)
++    return 0;
++
++  // Extract physical address from PTE
++  pa = PTE2PA(*pte);
++
++  // Add page offset
++  return pa + (va % PGSIZE);
++}
++
++uint64
++sys_sbrklazy_size(void)
++{
++    int size = 0;
++    argint(0, &size);
++    if(size <= 0)
++        return -1;
++    sbrklazy_size = size;
++    return 0;
++}
+diff --git a/kernel/trap.c b/kernel/trap.c
+index a41cd69..1a24f8e 100644
+--- a/kernel/trap.c
++++ b/kernel/trap.c
+@@ -11,6 +11,8 @@ uint ticks;
+ 
+ extern char trampoline[], uservec[];
+ 
++extern uint64 fastuptime_page_addr;
++
+ // in kernelvec.S, calls kerneltrap().
+ void kernelvec();
+ 
+@@ -167,6 +169,9 @@ clockintr()
+   if(cpuid() == 0){
+     acquire(&tickslock);
+     ticks++;
++
++    *(uint*)fastuptime_page_addr = ticks;
++
+     wakeup(&ticks);
+     release(&tickslock);
+   }
+diff --git a/kernel/vm.c b/kernel/vm.c
+index 28f4248..d23e791 100644
+--- a/kernel/vm.c
++++ b/kernel/vm.c
+@@ -13,10 +13,14 @@
+  */
+ pagetable_t kernel_pagetable;
+ 
++uint sbrklazy_size = 1;
++
+ extern char etext[];  // kernel.ld sets this to end of kernel code.
+ 
+ extern char trampoline[]; // trampoline.S
+ 
++uint64 fastuptime_page_addr;
++
+ // Make a direct-map page table for the kernel.
+ pagetable_t
+ kvmmake(void)
+@@ -45,6 +49,10 @@ kvmmake(void)
+   // the highest virtual address in the kernel.
+   kvmmap(kpgtbl, TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
+ 
++  fastuptime_page_addr = (uint64)kalloc();
++  if(fastuptime_page_addr == 0)
++    panic("kalloc");
++
+   // allocate and map a kernel stack for each process.
+   proc_mapstacks(kpgtbl);
+   
+@@ -452,22 +460,32 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
+ uint64
+ vmfault(pagetable_t pagetable, uint64 va, int read)
+ {
+-  uint64 mem;
+   struct proc *p = myproc();
++  p->pagefaults++;
+ 
+   if (va >= p->sz)
+     return 0;
+-  va = PGROUNDDOWN(va);
+-  if(ismapped(pagetable, va)) {
+-    return 0;
+-  }
+-  mem = (uint64) kalloc();
+-  if(mem == 0)
+-    return 0;
+-  memset((void *) mem, 0, PGSIZE);
+-  if (mappages(p->pagetable, va, PGSIZE, mem, PTE_W|PTE_U|PTE_R) != 0) {
+-    kfree((void *)mem);
+-    return 0;
++
++  uint64 a, mem = 0;
++  int pages_allocated = 0;
++
++  for (a = PGROUNDDOWN(va); a < p->sz && pages_allocated < sbrklazy_size; a += PGSIZE) {
++    if (ismapped(pagetable, a))
++      continue;
++
++    mem = (uint64) kalloc();
++    if (mem == 0)
++      return 0;
++
++    memset((void *) mem, 0, PGSIZE);
++
++    if (mappages(pagetable, a, PGSIZE, mem, PTE_R | PTE_U | PTE_W) != 0) {
++      kfree((void *) mem);
++      return 0;
++    }
++
++    pages_allocated++;
++    // printf("allocating page %lu\n", a / PGSIZE);
+   }
+   return mem;
+ }
+diff --git a/user/p1a.c b/user/p1a.c
+new file mode 100644
+index 0000000..92a9bfb
+--- /dev/null
++++ b/user/p1a.c
+@@ -0,0 +1,33 @@
++#include "kernel/types.h"
++#include "kernel/stat.h"
++#include "user/user.h"
++
++#define NUMPAGES 512
++#define PAGESIZE 4096
++
++int main(int argc, char* argv[]) {
++  if (argc != 2) {
++    printf("Usage: p1a <sbrklazy_size>\n");
++    exit(1);
++  }
++
++  int k = atoi(argv[1]);
++  if (k <= 0 || k > NUMPAGES) {
++    printf("0 <= sbrklazy_size <= %d\n", NUMPAGES);
++    exit(1);
++  }
++
++  sbrklazy_size(k); // Uncomment this line after implementing sbrklazy_size
++
++  char* old_sbrk = (char*)sbrklazy(NUMPAGES * PAGESIZE);
++  printf("Number of pages allocated: %d, k = %d\n", NUMPAGES, k);
++
++  for (char* p = old_sbrk; p < old_sbrk + NUMPAGES * PAGESIZE; p += PAGESIZE) {
++    *p = 'a';
++  }
++
++  printf("Expected page faults: %d\n", (NUMPAGES + k - 1) / k);
++  printf("Actual page faults: %d\n", get_pagefaults());
++
++  exit(0);
++}
+\ No newline at end of file
+diff --git a/user/p1b.c b/user/p1b.c
+new file mode 100644
+index 0000000..4701deb
+--- /dev/null
++++ b/user/p1b.c
+@@ -0,0 +1,47 @@
++#include "kernel/types.h"
++#include "kernel/stat.h"
++#include "user/user.h"
++
++#define NUMPAGES 12
++#define PAGESIZE 4096
++
++void access_page(char* base, int pg) {
++  printf("Accessing page %d | ", pg);
++  base[pg * PAGESIZE] = 'x';
++  printf("total pgfaults: %d\n", get_pagefaults());
++}
++
++int main(int argc, char* argv[]) {
++  sbrklazy_size(4); // Uncomment this line after implementing sbrklazy_size
++
++  char* base = (char*)sbrklazy(NUMPAGES * PAGESIZE);
++
++  printf("sbrklazy_size = 4\n");
++  printf("Allocated %d pages lazily\n\n", NUMPAGES);
++
++  access_page(base, 2);  // expect faults = 1
++  access_page(base, 3);  // should not fault
++  access_page(base, 5);  // should not fault
++  access_page(base, 4);  // should not fault
++
++  printf("\n");
++  
++  access_page(base, 7); // expect faults = 2
++  access_page(base, 8); // should not fault
++  access_page(base, 9); // should not fault
++  access_page(base, 10); // should not fault
++
++  printf("\n");
++
++  access_page(base, 0); // expect faults = 3
++  access_page(base, 1); // should not fault
++  access_page(base, 6); // should not fault
++  access_page(base, 11); // should not fault
++
++  printf("\n");
++  access_page(base, 5); // should not fault
++
++  access_page(base, 12); // trap!!!
++
++  exit(0);
++}
+diff --git a/user/p1c.c b/user/p1c.c
+new file mode 100644
+index 0000000..191212d
+--- /dev/null
++++ b/user/p1c.c
+@@ -0,0 +1,66 @@
++#include "kernel/types.h"
++#include "kernel/stat.h"
++#include "user/user.h"
++
++#define NUMPAGES 1024
++#define PAGESIZE 4096
++
++int main(int argc, char* argv[]) {
++  char *old_sbrk = (char*)sbrklazy(NUMPAGES * PAGESIZE), *p;
++
++  printf("Number of pages allocated: %d\n", NUMPAGES);
++
++  ////////////////////////////
++  printf("Accessing %d pages with sbrklazy_size(1)\n", NUMPAGES / 4);
++  sbrklazy_size(1); // Uncomment this line after implementing sbrklazy_size
++
++  for (p = old_sbrk; p < old_sbrk + NUMPAGES * PAGESIZE / 4; p += PAGESIZE) {
++    *p = 'a';
++  }
++
++  printf("Expected page faults: %d\n", NUMPAGES / 4);
++  printf("Actual page faults: %d\n", get_pagefaults());
++
++  printf("\n");
++
++  //////////////////////////////
++  printf("Accessing %d pages with sbrklazy_size(2)\n", NUMPAGES / 4);
++  sbrklazy_size(2); // Uncomment this line after implementing sbrklazy_size
++
++  for (; p < old_sbrk + 2 * NUMPAGES * PAGESIZE / 4; p += PAGESIZE) {
++    *p = 'b';
++  }
++
++  printf("Expected page faults: %d\n", NUMPAGES / 4 + NUMPAGES / 4 / 2);
++  printf("Actual page faults: %d\n", get_pagefaults());
++
++  printf("\n");
++
++  ///////////////////////////////
++  printf("Accessing %d pages with sbrklazy_size(4)\n", NUMPAGES / 4);
++  sbrklazy_size(4); // Uncomment this line after implementing sbrklazy_size
++
++  for (; p < old_sbrk + 3 * NUMPAGES * PAGESIZE / 4; p += PAGESIZE) {
++    *p = 'b';
++  }
++
++  printf("Expected page faults: %d\n",
++         NUMPAGES / 4 + NUMPAGES / 4 / 2 + NUMPAGES / 4 / 4);
++  printf("Actual page faults: %d\n", get_pagefaults());
++
++  printf("\n");
++
++  ////////////////////////////////
++  printf("Accessing %d pages with sbrklazy_size(1)\n", NUMPAGES / 4);
++  sbrklazy_size(1); // Uncomment this line after implementing sbrklazy_size
++
++  for (; p < old_sbrk + 4 * NUMPAGES * PAGESIZE / 4; p += PAGESIZE) {
++    *p = 'b';
++  }
++
++  printf("Expected page faults: %d\n",
++         NUMPAGES / 4 + NUMPAGES / 4 / 2 + NUMPAGES / 4 / 4 + NUMPAGES / 4);
++  printf("Actual page faults: %d\n", get_pagefaults());
++
++  exit(0);
++}
+\ No newline at end of file
+diff --git a/user/p1d.c b/user/p1d.c
+new file mode 100644
+index 0000000..3da055e
+--- /dev/null
++++ b/user/p1d.c
+@@ -0,0 +1,28 @@
++#include "kernel/types.h"
++#include "kernel/stat.h"
++#include "user/user.h"
++
++#define NUMPAGES 12
++#define PAGESIZE 4096
++
++void access_page(char* base, int pg) {
++  printf("Accessing page %d | ", pg);
++  base[pg * PAGESIZE] = 'x';
++  printf("total pgfaults: %d\n", get_pagefaults());
++}
++
++int main(int argc, char* argv[]) {
++  sbrklazy_size(4); // Uncomment this line after implementing sbrklazy_size
++
++  char* base = (char*)sbrklazy(NUMPAGES * PAGESIZE);
++
++  printf("sbrklazy_size = 4\n");
++  printf("Allocated %d pages lazily\n\n", NUMPAGES);
++  
++  access_page(base, 10); // expect faults = 1
++  access_page(base, 11); // should not fault
++  access_page(base, 0); // expect faults = 2
++  access_page(base, 1); // expect faults = 2
++
++  exit(0);
++}
+diff --git a/user/p2a.c b/user/p2a.c
+new file mode 100644
+index 0000000..8565b9d
+--- /dev/null
++++ b/user/p2a.c
+@@ -0,0 +1,32 @@
++#include "kernel/types.h"
++#include "user/user.h"
++
++int main(int argc, char* argv[]) {
++  if (argc < 2) {
++    printf("Usage: p2a <path> <args>\n");
++    exit(1);
++  }
++  for (int i = 1; i < argc; i++) {
++    argv[i - 1] = argv[i];
++  }
++  argv[argc - 1] = 0;
++  int pid = -1;
++  pid = spawn(argv[0], argv); // Uncomment this after implementing spawn
++  if (pid <= 0) {
++    printf("Spawn failed\n");
++    exit(pid);
++  }
++  printf("[pid %d] Parent: spawning child %s with pid %d\n", getpid(), argv[0],
++         pid);
++  int status = 0;
++  int wpid = 0;
++  do {
++    wpid = wait(&status);
++    if (wpid < 0) exit(wpid);
++  } while (wpid != pid);
++
++  printf("[pid %d] Parent: child %s with pid %d terminated with status %d\n",
++         getpid(), argv[0], pid, status);
++
++  exit(0);
++}
+diff --git a/user/p2b.c b/user/p2b.c
+new file mode 100644
+index 0000000..31d5aba
+--- /dev/null
++++ b/user/p2b.c
+@@ -0,0 +1,17 @@
++#include "kernel/types.h"
++#include "user/user.h"
++
++int
++main(int argc, char *argv[])
++{
++  if (argc != 3) {
++    printf("Usage: p2b <path> <exit status> <arg>\n");
++    exit(1);
++  }
++
++  pause(1);
++  
++  printf("[pid %d] Child: %s\n", getpid(), argv[2]);
++
++  exit(atoi(argv[1]));
++}
+diff --git a/user/p2c.c b/user/p2c.c
+new file mode 100644
+index 0000000..1957f67
+--- /dev/null
++++ b/user/p2c.c
+@@ -0,0 +1,14 @@
++#include "kernel/types.h"
++#include "user/user.h"
++
++int main(int argc, char* argv[]) {
++  printf("[pid %d] Parent: Calling spawn(0, 0)\n", getpid());
++  int ret = -1;
++  ret = spawn(0, 0); // Uncomment this after implementing spawn
++  if (ret == 0) {
++    printf("[pid %d] Child: hello.\n", getpid());
++    exit(0);
++  }
++  ret = wait(0);
++  printf("[pid %d] Parent: goodbye. Reaped process with pid %d.\n", getpid(), ret);
++}
+diff --git a/user/p3a.c b/user/p3a.c
+new file mode 100644
+index 0000000..5569a51
+--- /dev/null
++++ b/user/p3a.c
+@@ -0,0 +1,20 @@
++#include "kernel/types.h"
++#include "user/user.h"
++
++#define PGSIZE 4096  // bytes per page
++#define MAXVA (1L << (9 + 9 + 9 + 12 - 1))
++#define TRAMPOLINE (MAXVA - PGSIZE)
++#define TRAPFRAME (TRAMPOLINE - PGSIZE)
++#define FASTUPTIME_PAGE (TRAPFRAME - PGSIZE)
++
++int main(int argc, char* argv[]) {
++  printf("Reading addr FASTUPTIME_PAGE (%p)\nExpecting to not crash on read\n",
++         (void*)FASTUPTIME_PAGE);
++  uint a = *(uint*)FASTUPTIME_PAGE;
++  printf("Read value: %d\n", a);
++  printf("Writing to addr FASTUPTIME_PAGE (%p)\nExpecting to crash on write\n",
++         (void*)FASTUPTIME_PAGE);
++  *(uint*)FASTUPTIME_PAGE = 10;
++  printf("If this didn't crash, the page is NOT MAPPED PROPERLY!\n");
++  return 0;
++}
+diff --git a/user/p3b.c b/user/p3b.c
+new file mode 100644
+index 0000000..38b4f1d
+--- /dev/null
++++ b/user/p3b.c
+@@ -0,0 +1,48 @@
++#include "kernel/types.h"
++#include "kernel/stat.h"
++#include "user/user.h"
++
++#define PGSIZE 4096  // bytes per page
++#define MAXVA (1L << (9 + 9 + 9 + 12 - 1))
++#define TRAMPOLINE (MAXVA - PGSIZE)
++#define TRAPFRAME (TRAMPOLINE - PGSIZE)
++#define FASTUPTIME_PAGE (TRAPFRAME - PGSIZE)
++
++int main(int argc, char* argv[]) {
++  if (argc != 2) {
++    printf("Usage: %s <num_processes>\n", argv[0]);
++    exit(1);
++  }
++
++  int NPROCS = atoi(argv[1]);
++  printf("Creating %d processes...\n", NPROCS);
++  uint result[NPROCS];
++  memset(result, 0, sizeof(result));
++
++  uint64 parent_pa = va2pa(FASTUPTIME_PAGE);
++
++  for (int i = 0; i < NPROCS; i++) {
++    if (fork() == 0) {
++      uint64 child_pa = va2pa(FASTUPTIME_PAGE);
++      if (child_pa != parent_pa) {
++        exit(1);
++      }
++      exit(0);
++    }
++  }
++  int failed_pa_matches = 0;
++  for (int i = 0; i < NPROCS; i++) {
++    int status;
++    wait(&status);
++    if (status != 0) {
++      failed_pa_matches++;
++    }
++  }
++
++  if (parent_pa == 0 || failed_pa_matches > 0) {
++    printf("Failed: FASTUPTIME_PAGE not mapped properly.\n");
++  } else {
++    printf("Passed: FASTUPTIME_PAGE has the same PA in all child processes.\n");
++  }
++  exit(0);
++}
+diff --git a/user/p3c.c b/user/p3c.c
+new file mode 100644
+index 0000000..be67459
+--- /dev/null
++++ b/user/p3c.c
+@@ -0,0 +1,41 @@
++#include "kernel/types.h"
++#include "user/user.h"
++
++int main(int argc, char* argv[]) {
++  if (argc != 2) {
++    printf("Usage: %s <iterations>\n", argv[0]);
++    exit(1);
++  }
++
++  int iterations = atoi(argv[1]);
++
++  // Uncomment this line after you implement fastuptime
++  printf("start: uptime() = %u\tfastuptime() = %u\n", uptime(), fastuptime());
++
++  uint64 t1, t2, t3, t4;
++
++  // ---- measure normal syscall uptime() ----
++  t1 = uptime();
++  for (int i = 0; i < iterations; i++) {
++    fastuptime(); // Uncomment this line after you implement fastuptime
++  }
++  t2 = uptime();
++
++  uint64 elapsed_fast = t2 - t1;
++  printf("fastuptime() * %d: %lu ticks\n", iterations, elapsed_fast);
++
++  // ---- measure direct fastuptime() ----
++  t3 = uptime();
++  for (int i = 0; i < iterations; i++) {
++    uptime();
++  }
++  t4 = uptime();
++
++  uint64 elapsed_sys = t4 - t3;
++
++  printf("uptime()     * %d: %lu ticks\n", iterations, elapsed_sys);
++
++  // Uncomment this line after you implement fastuptime
++  printf("end  : uptime() = %u\tfastuptime() = %u\n", uptime(), fastuptime());
++  exit(0);
++}
+diff --git a/user/p3d.c b/user/p3d.c
+new file mode 100644
+index 0000000..d1f438b
+--- /dev/null
++++ b/user/p3d.c
+@@ -0,0 +1,48 @@
++#include "kernel/types.h"
++#include "kernel/stat.h"
++#include "user/user.h"
++
++#define PGSIZE 4096  // bytes per page
++#define MAXVA (1L << (9 + 9 + 9 + 12 - 1))
++#define TRAMPOLINE (MAXVA - PGSIZE)
++#define TRAPFRAME (TRAMPOLINE - PGSIZE)
++#define FASTUPTIME_PAGE (TRAPFRAME - PGSIZE)
++
++int main(int argc, char* argv[]) {
++  if (argc != 2) {
++    printf("Usage: %s <num_processes>\n", argv[0]);
++    exit(1);
++  }
++  int numprocs = atoi(argv[1]);
++
++  printf("[Parent] Creating %d processes...\n", numprocs);
++  
++  // Uncomment this line after you implement fastuptime
++  printf("[Parent] uptime() = %u\tfastuptime() = %u\n", uptime(), fastuptime());
++  for (int p = 0; p < numprocs; p++) {
++    int sleep_dur = 4 * (p + 1);
++    printf("[Parent] Child-%d will sleep for %d ticks\n", p + 1, sleep_dur);
++  }
++  for (int p = 0; p < numprocs; p++) {
++    int pid = fork();
++
++    if (pid < 0) {
++      printf("fork failed\n");
++      exit(1);
++    }
++
++    if (pid == 0) {
++      // Uncomment these after you implement fastuptime
++      int sleep_dur = 4 * (p + 1);
++      pause(sleep_dur);
++      printf("[Child %d] woke up! uptime() = %u\tfastuptime() = %u\n", p + 1, uptime(), fastuptime());
++      exit(0);
++    }
++  }
++
++  for (int i = 0; i < numprocs; i++) {
++    wait(0);
++  }
++
++  exit(0);
++}
+diff --git a/user/ulib.c b/user/ulib.c
+index 45fadb0..a1717c2 100644
+--- a/user/ulib.c
++++ b/user/ulib.c
+@@ -4,6 +4,7 @@
+ #include "kernel/riscv.h"
+ #include "kernel/vm.h"
+ #include "user/user.h"
++#include "kernel/memlayout.h"
+ 
+ //
+ // wrapper so that it's OK if main() does not call exit().
+@@ -159,3 +160,6 @@ sbrklazy(int n) {
+   return sys_sbrk(n, SBRK_LAZY);
+ }
+ 
++uint fastuptime(void) {
++  return *(uint*)FASTUPTIME_PAGE;
++}
+diff --git a/user/user.h b/user/user.h
+index ac84de9..74e6df5 100644
+--- a/user/user.h
++++ b/user/user.h
+@@ -24,6 +24,10 @@ int getpid(void);
+ char* sys_sbrk(int,int);
+ int pause(int);
+ int uptime(void);
++int get_pagefaults(void);
++uint64 va2pa(uint64);
++int sbrklazy_size(int);
++int spawn(const char*, char**);
+ 
+ // ulib.c
+ int stat(const char*, struct stat*);
+@@ -39,6 +43,7 @@ int memcmp(const void *, const void *, uint);
+ void *memcpy(void *, const void *, uint);
+ char* sbrk(int);
+ char* sbrklazy(int);
++uint fastuptime(void);
+ 
+ // printf.c
+ void fprintf(int, const char*, ...) __attribute__ ((format (printf, 2, 3)));
+diff --git a/user/usys.pl b/user/usys.pl
+index c5d4c3a..0bf4396 100755
+--- a/user/usys.pl
++++ b/user/usys.pl
+@@ -42,3 +42,7 @@ entry("getpid");
+ entry("sbrk");
+ entry("pause");
+ entry("uptime");
++entry("get_pagefaults");
++entry("va2pa");
++entry("sbrklazy_size");
++entry("spawn");

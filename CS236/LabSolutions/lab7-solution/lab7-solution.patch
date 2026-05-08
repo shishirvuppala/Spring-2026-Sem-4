@@ -1,0 +1,805 @@
+diff --git a/Makefile b/Makefile
+index b262c0a..a471e70 100644
+--- a/Makefile
++++ b/Makefile
+@@ -32,7 +32,7 @@ OBJS = \
+ 
+ # riscv64-unknown-elf- or riscv64-linux-gnu-
+ # perhaps in /opt/riscv/bin
+-#TOOLPREFIX = 
++#TOOLPREFIX =
+ 
+ # Try to infer the correct TOOLPREFIX if not set
+ ifndef TOOLPREFIX
+@@ -87,7 +87,7 @@ endif
+ LDFLAGS = -z max-page-size=4096
+ 
+ $K/kernel: $(OBJS) $K/kernel.ld
+-	$(LD) $(LDFLAGS) -T $K/kernel.ld -o $K/kernel $(OBJS) 
++	$(LD) $(LDFLAGS) -T $K/kernel.ld -o $K/kernel $(OBJS)
+ 	$(OBJDUMP) -S $K/kernel > $K/kernel.asm
+ 	$(OBJDUMP) -t $K/kernel | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > $K/kernel.sym
+ 
+@@ -145,13 +145,16 @@ UPROGS=\
+ 	$U/_logstress\
+ 	$U/_forphan\
+ 	$U/_dorphan\
++	$U/_p2\
++	$U/_p3\
++	$U/_p4\
+ 
+ fs.img: mkfs/mkfs README $(UPROGS)
+ 	mkfs/mkfs fs.img README $(UPROGS)
+ 
+ -include kernel/*.d user/*.d
+ 
+-clean: 
++clean:
+ 	rm -f *.tex *.dvi *.idx *.aux *.log *.ind *.ilg \
+ 	*/*.o */*.d */*.asm */*.sym \
+ 	$K/kernel fs.img \
+@@ -166,7 +169,7 @@ QEMUGDB = $(shell if $(QEMU) -help | grep -q '^-gdb'; \
+ 	then echo "-gdb tcp::$(GDBPORT)"; \
+ 	else echo "-s -p $(GDBPORT)"; fi)
+ ifndef CPUS
+-CPUS := 3
++CPUS := 1
+ endif
+ 
+ QEMUOPTS = -machine virt -bios none -kernel $K/kernel -m 128M -smp $(CPUS) -nographic
+diff --git a/kernel/defs.h b/kernel/defs.h
+index 122d9ca..004634e 100644
+--- a/kernel/defs.h
++++ b/kernel/defs.h
+@@ -81,6 +81,7 @@ void            printfinit(void);
+ int             cpuid(void);
+ void            kexit(int);
+ int             kfork(void);
++void            ksetprioritysched(int enable);
+ int             growproc(int);
+ void            proc_mapstacks(pagetable_t);
+ pagetable_t     proc_pagetable(struct proc *);
+diff --git a/kernel/proc.c b/kernel/proc.c
+index 22a5401..8e3aa1f 100644
+--- a/kernel/proc.c
++++ b/kernel/proc.c
+@@ -10,6 +10,12 @@ struct cpu cpus[NCPU];
+ 
+ struct proc proc[NPROC];
+ 
++#define CHECK_AFFINITY(mask, cpu) ((mask) & (1 << (cpu)))
++#define AFFINITY_ALL                ((1 << NCPU) - 1)
++
++int priority_sched_enabled = 0;
++struct spinlock priority_sched_lock;
++
+ struct proc *initproc;
+ 
+ int nextpid = 1;
+@@ -33,7 +39,7 @@ void
+ proc_mapstacks(pagetable_t kpgtbl)
+ {
+   struct proc *p;
+-  
++
+   for(p = proc; p < &proc[NPROC]; p++) {
+     char *pa = kalloc();
+     if(pa == 0)
+@@ -48,9 +54,10 @@ void
+ procinit(void)
+ {
+   struct proc *p;
+-  
++
+   initlock(&pid_lock, "nextpid");
+   initlock(&wait_lock, "wait_lock");
++  initlock(&priority_sched_lock, "priority_sched_lock");
+   for(p = proc; p < &proc[NPROC]; p++) {
+       initlock(&p->lock, "proc");
+       p->state = UNUSED;
+@@ -93,7 +100,7 @@ int
+ allocpid()
+ {
+   int pid;
+-  
++
+   acquire(&pid_lock);
+   pid = nextpid;
+   nextpid = nextpid + 1;
+@@ -125,6 +132,12 @@ found:
+   p->pid = allocpid();
+   p->state = USED;
+ 
++  memset(p->switch_ins, 0, sizeof(p->switch_ins));
++  memset(p->switch_outs, 0, sizeof(p->switch_outs));
++
++  p->priority = 0;
++  p->prefferred_cpu = AFFINITY_ALL;
++
+   // Allocate a trapframe page.
+   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
+     freeproc(p);
+@@ -169,6 +182,10 @@ freeproc(struct proc *p)
+   p->killed = 0;
+   p->xstate = 0;
+   p->state = UNUSED;
++  memset(p->switch_ins, 0, sizeof(p->switch_ins));
++  memset(p->switch_outs, 0, sizeof(p->switch_outs));
++  p->priority = 0;
++  p->prefferred_cpu = AFFINITY_ALL;
+ }
+ 
+ // Create a user page table for a given process, with no user memory,
+@@ -223,7 +240,7 @@ userinit(void)
+ 
+   p = allocproc();
+   initproc = p;
+-  
++
+   p->cwd = namei("/");
+ 
+   p->state = RUNNABLE;
+@@ -352,7 +369,7 @@ kexit(int status)
+ 
+   // Parent might be sleeping in wait().
+   wakeup(p->parent);
+-  
++
+   acquire(&p->lock);
+ 
+   p->xstate = status;
+@@ -408,7 +425,7 @@ kwait(uint64 addr)
+       release(&wait_lock);
+       return -1;
+     }
+-    
++
+     // Wait for a child to exit.
+     sleep(p, &wait_lock);  //DOC: wait-sleep
+   }
+@@ -437,16 +454,28 @@ scheduler(void)
+     intr_on();
+     intr_off();
+ 
++    int use_priority;
++    acquire(&priority_sched_lock);
++    use_priority = priority_sched_enabled;
++    release(&priority_sched_lock);
++
+     int found = 0;
++
++    if(!use_priority){
++      // ----------------------------------
++      // ORIGINAL XV6 ROUND ROBIN
++      // ----------------------------------
+     for(p = proc; p < &proc[NPROC]; p++) {
+       acquire(&p->lock);
+-      if(p->state == RUNNABLE) {
++      if(p->state == RUNNABLE && CHECK_AFFINITY(p->prefferred_cpu,cpuid())) {
+         // Switch to chosen process.  It is the process's job
+         // to release its lock and then reacquire it
+         // before jumping back to us.
+         p->state = RUNNING;
+         c->proc = p;
++        p->switch_ins[cpuid()]++;
+         swtch(&c->context, &p->context);
++        p->switch_outs[cpuid()]++;
+ 
+         // Process is done running for now.
+         // It should have changed its p->state before coming back.
+@@ -455,6 +484,50 @@ scheduler(void)
+       }
+       release(&p->lock);
+     }
++
++    } else {
++      // ----------------------------------
++      // PRIORITY MODE
++      // ----------------------------------
++      static int last_idx = 0;
++      struct proc *best = 0;
++      int best_idx = -1;
++
++      for(int i = 0; i < NPROC; i++){
++        int idx = (last_idx + i) % NPROC;
++        p = &proc[idx];
++
++        acquire(&p->lock);
++        if(p->state == RUNNABLE && CHECK_AFFINITY(p->prefferred_cpu,cpuid())){
++          if(best == 0 || p->priority > best->priority){
++            if(best)
++              release(&best->lock);
++
++            best = p;
++            best_idx = idx;
++            continue;
++          }
++        }
++        release(&p->lock);
++      }
++
++      if(best){
++        // printf("[kernel] selected pid %d with priority %d\n", best->pid, best->priority);
++        last_idx = (best_idx + 1) % NPROC;
++
++        best->state = RUNNING;
++        c->proc = best;
++
++        best->switch_ins[cpuid()]++;
++        swtch(&c->context, &best->context);
++        best->switch_outs[cpuid()]++;
++
++        c->proc = 0;
++        release(&best->lock);
++        found = 1;
++      }
++    }
++
+     if(found == 0) {
+       // nothing to run; stop running on this core until an interrupt.
+       asm volatile("wfi");
+@@ -509,6 +582,15 @@ forkret(void)
+   static int first = 1;
+   struct proc *p = myproc();
+ 
++
++  // printf("[pid %d] ", p->pid);
++  // if (p->parent) {
++  //   printf("ppid=%d ",p->parent->pid);
++  // } else {
++  //   printf("ppid=NA ");
++  // }
++  // printf("ra=%p kstack=%p\n", (void *)p->context.ra, (void *)p->kstack);
++
+   // Still holding p->lock from scheduler.
+   release(&p->lock);
+ 
+@@ -543,7 +625,7 @@ void
+ sleep(void *chan, struct spinlock *lk)
+ {
+   struct proc *p = myproc();
+-  
++
+   // Must acquire p->lock in order to
+   // change p->state and then call sched.
+   // Once we hold p->lock, we can be
+@@ -622,7 +704,7 @@ int
+ killed(struct proc *p)
+ {
+   int k;
+-  
++
+   acquire(&p->lock);
+   k = p->killed;
+   release(&p->lock);
+@@ -688,3 +770,9 @@ procdump(void)
+     printf("\n");
+   }
+ }
++
++void ksetprioritysched(int enable) {
++  acquire(&priority_sched_lock);
++  priority_sched_enabled = enable;
++  release(&priority_sched_lock);
++}
+diff --git a/kernel/proc.h b/kernel/proc.h
+index d021857..0437449 100644
+--- a/kernel/proc.h
++++ b/kernel/proc.h
+@@ -104,4 +104,9 @@ struct proc {
+   struct file *ofile[NOFILE];  // Open files
+   struct inode *cwd;           // Current directory
+   char name[16];               // Process name (debugging)
++  int switch_ins[NCPU];        // Number of times process switched in on each CPU
++  int switch_outs[NCPU];       // Number of times process switched out on each CPU
++  int priority;
++
++  int prefferred_cpu;          // Preferred CPU for scheduling
+ };
+diff --git a/kernel/syscall.c b/kernel/syscall.c
+index 076d965..846d535 100644
+--- a/kernel/syscall.c
++++ b/kernel/syscall.c
+@@ -101,6 +101,10 @@ extern uint64 sys_unlink(void);
+ extern uint64 sys_link(void);
+ extern uint64 sys_mkdir(void);
+ extern uint64 sys_close(void);
++extern uint64 sys_getswitchstats(void);
++extern uint64 sys_setpriority(void);
++extern uint64 sys_setprioritysched(void);
++extern uint64 sys_setcpuaffinity(void);
+ 
+ // An array mapping syscall numbers from syscall.h
+ // to the function that handles the system call.
+@@ -126,6 +130,10 @@ static uint64 (*syscalls[])(void) = {
+ [SYS_link]    sys_link,
+ [SYS_mkdir]   sys_mkdir,
+ [SYS_close]   sys_close,
++[SYS_getswitchstats] sys_getswitchstats,
++[SYS_setpriority] sys_setpriority,
++[SYS_setprioritysched] sys_setprioritysched,
++[SYS_setcpuaffinity] sys_setcpuaffinity,
+ };
+ 
+ void
+diff --git a/kernel/syscall.h b/kernel/syscall.h
+index 3dd926d..a3a2b0d 100644
+--- a/kernel/syscall.h
++++ b/kernel/syscall.h
+@@ -20,3 +20,7 @@
+ #define SYS_link   19
+ #define SYS_mkdir  20
+ #define SYS_close  21
++#define SYS_getswitchstats 22
++#define SYS_setpriority 23
++#define SYS_setprioritysched 24
++#define SYS_setcpuaffinity 25
+diff --git a/kernel/sysproc.c b/kernel/sysproc.c
+index 419e727..569e59f 100644
+--- a/kernel/sysproc.c
++++ b/kernel/sysproc.c
+@@ -107,3 +107,76 @@ sys_uptime(void)
+   release(&tickslock);
+   return xticks;
+ }
++
++uint64
++sys_getswitchstats(void)
++{
++  uint64 u_switch_ins;   // user pointer
++  uint64 u_switch_outs;  // user pointer
++
++  // fetch syscall arguments
++  argaddr(0, &u_switch_ins);
++  argaddr(1, &u_switch_outs);
++
++  struct proc *p = myproc();
++
++  // Copy switch_ins array to user space
++  acquire(&p->lock);
++  if (copyout(p->pagetable, u_switch_ins, (char *)p->switch_ins, sizeof(p->switch_ins)) < 0) {
++    release(&p->lock);
++    return -1;
++  }
++
++  // Copy switch_outs array to user space
++  if (copyout(p->pagetable, u_switch_outs, (char *)p->switch_outs, sizeof(p->switch_outs)) < 0) {
++    release(&p->lock);
++    return -1;
++  }
++
++  release(&p->lock);
++  return 0;
++}
++
++uint64 sys_setpriority(void) {
++  int priority;
++  argint(0, &priority);
++
++  if (priority < 0 || priority > 10) {
++    return -1;
++  }
++
++  struct proc *p = myproc();
++  acquire(&p->lock);
++  p->priority = priority;
++  release(&p->lock);
++
++  return 0;
++}
++
++uint64 sys_setprioritysched(void) {
++  int enable;
++  argint(0, &enable);
++
++  if (enable != 0 && enable != 1) {
++    return -1;
++  }
++  ksetprioritysched(enable);
++
++  return 0;
++}
++
++uint64 sys_setcpuaffinity(void) {
++  int cpu_mask;
++  argint(0, &cpu_mask);
++
++  if (cpu_mask <= 0 || cpu_mask >= (1 << NCPU)) {
++    return -1;
++  }
++
++  struct proc *p = myproc();
++  acquire(&p->lock);
++  p->prefferred_cpu = cpu_mask;
++  release(&p->lock);
++
++  return 0;
++}
+diff --git a/user/p2.c b/user/p2.c
+new file mode 100644
+index 0000000..9de7f98
+--- /dev/null
++++ b/user/p2.c
+@@ -0,0 +1,161 @@
++#include "kernel/types.h"
++#include "user/user.h"
++
++#define NCPU 8
++#define RUNTIME 20
++
++struct stats {
++  char label[16];
++  int pid;
++  int in;
++  int out;
++};
++
++// ------------------------------------------------------------
++
++void collect_stats(struct stats* s, char* label) {
++  int ins[NCPU];
++  int outs[NCPU];
++  int i;
++
++  s->pid = getpid();
++
++  // copy label
++  for (i = 0; i < 15 && label[i]; i++) s->label[i] = label[i];
++  s->label[i] = 0;
++
++  if (getswitchstats(ins, outs) < 0) {
++    s->in = -1;
++    s->out = -1;
++    return;
++  }
++
++  s->in = 0;
++  s->out = 0;
++
++  for (i = 0; i < NCPU; i++) {
++    s->in += ins[i];
++    s->out += outs[i];
++  }
++}
++
++// ------------------------------------------------------------
++
++void busy_worker(int fd, char* label) {
++  int start = uptime();
++  while (uptime() - start < RUNTIME)
++    for (volatile int i = 0; i < 10000; i++);
++
++  struct stats s;
++  collect_stats(&s, label);
++
++  write(fd, &s, sizeof(s));
++  close(fd);
++  exit(0);
++}
++
++void sleep_worker(int fd, char* label) {
++  int start = uptime();
++  while (uptime() - start < RUNTIME) pause(RUNTIME);
++
++  struct stats s;
++  collect_stats(&s, label);
++
++  write(fd, &s, sizeof(s));
++  close(fd);
++  exit(0);
++}
++
++// ------------------------------------------------------------
++
++void run_pair(int busy1, int busy2) {
++  int p1[2], p2[2];
++  pipe(p1);
++  pipe(p2);
++
++  if (fork() == 0) {
++    close(p1[0]);
++    if (busy1)
++      busy_worker(p1[1], "busy-A");
++    else
++      sleep_worker(p1[1], "sleep-A");
++  }
++
++  if (fork() == 0) {
++    close(p2[0]);
++    if (busy2)
++      busy_worker(p2[1], "busy-B");
++    else
++      sleep_worker(p2[1], "sleep-B");
++  }
++
++  close(p1[1]);
++  close(p2[1]);
++
++  struct stats s1, s2;
++
++  read(p1[0], &s1, sizeof(s1));
++  read(p2[0], &s2, sizeof(s2));
++
++  close(p1[0]);
++  close(p2[0]);
++
++  wait(0);
++  wait(0);
++
++  printf("%s (pid=%d) in=%d out=%d\n", s1.label, s1.pid, s1.in, s1.out);
++
++  printf("%s (pid=%d) in=%d out=%d\n", s2.label, s2.pid, s2.in, s2.out);
++}
++void run_single(int busy1) {
++  int p1[2];
++  pipe(p1);
++
++
++  if (fork() == 0) {
++    close(p1[0]);
++    if (busy1)
++      busy_worker(p1[1], "busy-A");
++    else
++      sleep_worker(p1[1], "sleep-A");
++  }
++
++  close(p1[1]);
++
++
++  struct stats s1;
++
++  read(p1[0], &s1, sizeof(s1));
++
++  close(p1[0]);
++
++  wait(0);
++  printf("%s (pid=%d) in=%d out=%d\n", s1.label, s1.pid, s1.in, s1.out);
++}
++
++
++
++int main() {
++  printf("------------------------------------\n");
++  printf("RUNNING: single busy process for %d ticks\n", RUNTIME);
++  run_single(1);
++
++  printf("------------------------------------\n");
++  printf("RUNNING: single sleep process for %d ticks\n", RUNTIME);
++  run_single(0);
++
++  printf("------------------------------------\n");
++  printf("RUNNING: two BUSY processes for %d ticks\n", RUNTIME);
++  run_pair(1, 1);
++
++  printf("------------------------------------\n");
++  printf("RUNNING: BUSY + SLEEP process for %d ticks\n", RUNTIME);
++  run_pair(1, 0);
++
++  printf("------------------------------------\n");
++  printf("RUNNING: two SLEEP processes for %d ticks\n", RUNTIME);
++  run_pair(0, 0);
++
++  printf("------------------------------------\n");
++  return 0;
++}
+diff --git a/user/p3.c b/user/p3.c
+new file mode 100644
+index 0000000..6684d1e
+--- /dev/null
++++ b/user/p3.c
+@@ -0,0 +1,75 @@
++#include "kernel/types.h"
++#include "user/user.h"
++
++#define CYCLES 100000000  // how long to run (ticks)
++
++// ------------------------------------------------------------
++
++int busy() {
++  int a = 0;
++  for (int j = 0; j < 5; j++) {
++    for (int i = 0; i < CYCLES; i++) {
++      a += i;
++      a %= 1000;
++    }
++  }
++  pause(0);
++  return a;
++}
++
++// ------------------------------------------------------------
++
++void run_test(int use_priority) {
++  if (use_priority) {
++    setprioritysched(1);
++  } else {
++    setprioritysched(0);
++  }
++  // pause(10);  // let the scheduler stabilize
++
++  int start = uptime();
++
++  int pid1 = fork();
++  if (pid1 == 0) {
++    if (use_priority) {
++      printf("[pid %d] setting high priority\n", getpid());
++      setpriority(10);  // high priority
++    }
++    busy();
++    int end = uptime();
++    printf("[pid %d] start: %d, end: %d\n", getpid(),start, end);
++    // printf("[pid %d] finished in %d ticks\n", getpid(), end - start);
++    exit(0);
++  }
++
++  int pid2 = fork();
++  if (pid2 == 0) {
++    if (use_priority) {
++      printf("[pid %d] setting low priority\n", getpid());
++      setpriority(1);  // low priority
++    }
++    busy();
++    int end = uptime();
++    printf("[pid %d] start: %d, end: %d\n", getpid(),start, end);
++    // printf("[pid %d] finished in %d ticks\n", getpid(), end - start);
++    exit(0);
++  }
++
++  wait(0);
++  wait(0);
++
++  // cleanup
++
++  setprioritysched(0);
++}
++
++// ------------------------------------------------------------
++
++int main() {
++  printf("=== Round Robin Scheduling ===\n");
++  run_test(0);  // round robin
++
++  printf("\n=== Priority Scheduling===\n");
++  run_test(1);  // priority scheduling
++  return 0;
++}
+diff --git a/user/p4.c b/user/p4.c
+new file mode 100644
+index 0000000..8d3d6af
+--- /dev/null
++++ b/user/p4.c
+@@ -0,0 +1,107 @@
++#include "kernel/types.h"
++#include "kernel/stat.h"
++#include "user/user.h"
++
++#define NCPU 8
++#define RUN_TICKS 100
++#define NUM_CHILDREN 4
++
++int ins[NCPU], outs[NCPU];
++
++void busy_loop(void) {
++  int start = uptime();
++  while (uptime() - start < RUN_TICKS) {
++    for (volatile int i = 0; i < 1000000; i++);
++  }
++}
++
++void print_stats(void) {
++  printf("-> stats for child1: \n");
++  getswitchstats(ins, outs);
++  for (int i = 0; i < 2; i++) {
++    printf("CPU %d: in=%d out=%d\n", i, ins[i], outs[i]);
++  }
++}
++
++int main(void) {
++  printf("=== Scenario: Without CPU Affinity ===\n");
++
++  int pid = fork();
++  if (pid == 0) {
++    busy_loop();
++    print_stats();
++    exit(0);
++  }
++  for (int i = 0; i < NUM_CHILDREN - 1; i++) {
++    pid = fork();
++    if (pid == 0) {
++      busy_loop();
++      exit(0);
++    }
++  }
++  for (int i = 0; i < NUM_CHILDREN; i++) {
++    wait(0);
++  }
++
++  printf("\n=== Scenario: child1(CPU 0) others(CPU 1) ===\n");
++  pid = fork();
++  if (pid == 0) {
++    setcpuaffinity(1);
++    busy_loop();
++    print_stats();
++    exit(0);
++  }
++  for (int i = 0; i < NUM_CHILDREN - 1; i++) {
++    pid = fork();
++    if (pid == 0) {
++      setcpuaffinity(2);
++      busy_loop();
++      exit(0);
++    }
++  }
++  for (int i = 0; i < NUM_CHILDREN; i++) {
++    wait(0);
++  }
++
++
++  printf("\n=== Scenario: child1(CPU 0 & 1) others(CPU 1) ===\n");
++   pid = fork();
++   if (pid == 0) {
++     setcpuaffinity(3);
++     busy_loop();
++     print_stats();
++     exit(0);
++   }
++   for (int i = 0; i < NUM_CHILDREN - 1; i++) {
++     pid = fork();
++     if (pid == 0) {
++       setcpuaffinity(2);
++       busy_loop();
++       exit(0);
++     }
++   }
++   for (int i = 0; i < NUM_CHILDREN; i++) {
++     wait(0);
++   }
++
++  printf("\n=== Scenario: child1(CPU 0 & 1) others(CPU 0 & 1) ===\n");
++  pid = fork();
++  if (pid == 0) {
++    setcpuaffinity(3);
++    busy_loop();
++    print_stats();
++    exit(0);
++  }
++  for (int i = 0; i < NUM_CHILDREN - 1; i++) {
++    pid = fork();
++    if (pid == 0) {
++      setcpuaffinity(3);
++      busy_loop();
++      exit(0);
++    }
++  }
++  for (int i = 0; i < NUM_CHILDREN; i++) {
++    wait(0);
++  }
++  return 0;
++}
+diff --git a/user/user.h b/user/user.h
+index ac84de9..2538216 100644
+--- a/user/user.h
++++ b/user/user.h
+@@ -24,6 +24,10 @@ int getpid(void);
+ char* sys_sbrk(int,int);
+ int pause(int);
+ int uptime(void);
++int getswitchstats(int *switch_ins, int *switch_outs);
++int setpriority(int priority);
++void setprioritysched(int enable);
++int setcpuaffinity(int cpu_id);
+ 
+ // ulib.c
+ int stat(const char*, struct stat*);
+diff --git a/user/usys.pl b/user/usys.pl
+index c5d4c3a..67f8b88 100755
+--- a/user/usys.pl
++++ b/user/usys.pl
+@@ -42,3 +42,7 @@ entry("getpid");
+ entry("sbrk");
+ entry("pause");
+ entry("uptime");
++entry("getswitchstats");
++entry("setpriority");
++entry("setprioritysched");
++entry("setcpuaffinity");

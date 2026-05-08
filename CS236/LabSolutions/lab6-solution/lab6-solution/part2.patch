@@ -1,0 +1,673 @@
+diff --git a/Makefile b/Makefile
+index b262c0a..a47c7ea 100644
+--- a/Makefile
++++ b/Makefile
+@@ -28,7 +28,8 @@ OBJS = \
+   $K/sysfile.o \
+   $K/kernelvec.o \
+   $K/plic.o \
+-  $K/virtio_disk.o
++  $K/virtio_disk.o\
++  $K/shm.o \
+ 
+ # riscv64-unknown-elf- or riscv64-linux-gnu-
+ # perhaps in /opt/riscv/bin
+@@ -145,6 +146,9 @@ UPROGS=\
+ 	$U/_logstress\
+ 	$U/_forphan\
+ 	$U/_dorphan\
++	$U/_p2a\
++	$U/_p2b2\
++	$U/_p2b1\
+ 
+ fs.img: mkfs/mkfs README $(UPROGS)
+ 	mkfs/mkfs fs.img README $(UPROGS)
+diff --git a/kernel/memlayout.h b/kernel/memlayout.h
+index 9bc9424..d48c9f3 100644
+--- a/kernel/memlayout.h
++++ b/kernel/memlayout.h
+@@ -57,3 +57,4 @@
+ //   TRAPFRAME (p->trapframe, used by the trampoline)
+ //   TRAMPOLINE (the same page as in the kernel)
+ #define TRAPFRAME (TRAMPOLINE - PGSIZE)
++#define SHMEM (TRAPFRAME - PGSIZE)
+\ No newline at end of file
+diff --git a/kernel/proc.h b/kernel/proc.h
+index d021857..4e599ed 100644
+--- a/kernel/proc.h
++++ b/kernel/proc.h
+@@ -104,4 +104,5 @@ struct proc {
+   struct file *ofile[NOFILE];  // Open files
+   struct inode *cwd;           // Current directory
+   char name[16];               // Process name (debugging)
++  int shm_attached;
+ };
+diff --git a/kernel/shm.c b/kernel/shm.c
+new file mode 100644
+index 0000000..736ef3e
+--- /dev/null
++++ b/kernel/shm.c
+@@ -0,0 +1,179 @@
++#include "types.h"
++#include "param.h"
++#include "memlayout.h"
++#include "riscv.h"
++#include "spinlock.h"
++#include "proc.h"
++#include "defs.h"
++#include "shm.h"
++
++
++uint64 sys_shm_init(void)
++{
++    struct proc *p = myproc();
++
++    // TODO: Check whether a shared memory page is already created.
++    // If shm.valid indicates an existing shared page, this syscall
++    // must fail because we only allow ONE shared page in this lab.
++    // Return -1 in that case.
++    if(shm.valid)
++        return -1;
++
++    // TODO: Allocate exactly one physical page from the kernel
++    // allocator using kalloc(). This will return a kernel virtual
++    // address (KVA). If allocation fails (returns 0), return -1.
++    char *mem = kalloc();
++    if(mem==0)
++        return -1;
++
++    // TODO: Initialize (zero out) the allocated page using memset()
++    // so that the shared memory starts in a clean state.
++    memset(mem, 0, PGSIZE);
++
++    // TODO: Initialize the global shared memory structure:
++    // shm.kva    → store the allocated kernel virtual address
++    // shm.refcnt → set to 0 because no process has attached yet
++    // shm.valid  → mark as 1 (or true) to indicate the page exists
++
++    shm.kva = (uint64)mem; // address returned by kalloc(), typecast to uint64 if required
++    shm.refcnt = 0;
++    shm.valid = 1;
++
++    // TODO: Initialize the current process attachment state.
++    // Since the process has not attached yet, mark it as not attached.
++    // Suggested convention: -1 means "not attached".
++    p->shm_attached = -1;
++
++    // Success
++    return 0;
++
++}
++
++uint64 sys_shm_attach(void)
++{
++    struct proc *p = myproc();
++
++    // TODO: First verify that the shared memory page has been created.
++    // If shm.valid is false (or 0), it means shm_init() was never called.
++    // In that case, attaching should fail and return -1.
++    if(!shm.valid)
++        return -1;
++
++    // TODO: Also check if this process has already attached.
++    // If p->shm_attached=1 indicates an existing attachment,
++    // do NOT attach again (avoid double mapping) and return -1.
++    if(p->shm_attached==1)
++        return -1;
++
++    // We will map the shared memory at a fixed virtual address
++    // so that all processes see it at the same location.
++    uint64 uva = SHMEM;
++
++    // TODO: Set pa (physical address) to the physical page that
++    // backs the shared memory. This should come from shm.kva
++    // (the page allocated during shm_init).
++
++    uint64 pa = shm.kva;
++
++    // TODO: Map the shared physical page into this process’s
++    // page table using mappages().
++    // Permissions should allow user read and write access.
++    // If mapping fails, return -1.
++    if (mappages(p->pagetable, uva, PGSIZE, pa,
++                 PTE_R | PTE_W | PTE_U) < 0)
++    {
++        return -1;
++    }
++
++    // TODO: Increase the global reference count because one more
++    // process is now using (referencing) the shared memory page.
++    shm.refcnt++;
++
++    // TODO: Mark that this process has successfully attached
++    // to the shared memory to prevent duplicate attachments.
++    p->shm_attached = 1;
++
++    // Return the user virtual address where the page is mapped
++    return uva;
++}
++
++uint64 sys_shm_detach(void)
++{
++    struct proc *p = myproc();
++
++    // TODO: Validate two conditions before detaching:
++    // 1) Shared memory must exist (shm.valid should be true)
++    // 2) This process must currently be attached (p->shm_attached == 1)
++    // If either condition fails, return -1.
++    if(!shm.valid || p->shm_attached!=1)
++        return -1;
++
++    // TODO: Unmap the shared memory page from the process’s
++    // virtual address space using uvmunmap().
++    // IMPORTANT: Do NOT free the physical page here,
++    // because other processes might still be using it.
++    uvmunmap(p->pagetable, SHMEM, 1, 0); // 1 page, do not free physical memory
++
++    // TODO: Decrease the global reference count since this
++    // process is no longer referencing the shared memory.
++    shm.refcnt--;
++
++    // TODO: Update the process state to indicate that it is
++    // no longer attached to the shared memory.
++    p->shm_attached = -1;
++
++    return 0; // success
++}
++
++uint64 sys_shm_destroy(void)
++{
++    struct proc *p = myproc();
++
++    // TODO: First check if the shared memory page even exists.
++    // If shm.valid is false, destruction should fail (return -1).
++    if(!shm.valid)
++        return -1;
++
++    // TODO: Ensure that no process is currently using the shared memory.
++    // If shm.refcnt is NOT zero, it means some process is still attached.
++    // In that case, do NOT destroy the page and return -1.
++    if(shm.refcnt!=0)
++        return -1;
++
++    // TODO:
++    // Check that the calling process has properly
++    // detached before destroying (i.e., p->shm_attached == -1).
++    if(p->shm_attached!=-1)
++        return -1;
++
++    // TODO: Free the physical page using kfree().
++    // This releases the memory back to the kernel allocator.
++    //kfree((char *)va);
++    kfree((char *)shm.kva);
++
++    // TODO: Reset the global shared memory metadata so that the
++    // system returns to the "no shared memory" state:
++    // shm.valid  → 0 (invalid)
++    // shm.kva    → 0 (no page)
++    // shm.refcnt → 0 (no references)
++
++    shm.valid = 0;
++    shm.kva = 0;
++    shm.refcnt = 0;
++
++    // TODO: Reset process state to default (not attached)
++    p->shm_attached = 0;
++
++    // Success
++    return 0;
++}
++
++uint64 sys_shm_refcnt(void)
++{ 
++    // TODO: First check if the shared memory page exists.
++    // If shm.valid is false (return -1).
++    if(!shm.valid)
++        return -1;
++    //TODO: Return reference count
++    return shm.refcnt;
++}
+diff --git a/kernel/shm.h b/kernel/shm.h
+new file mode 100644
+index 0000000..bef4190
+--- /dev/null
++++ b/kernel/shm.h
+@@ -0,0 +1,15 @@
++#ifndef _SHM_H_
++#define _SHM_H_
++
++#include "types.h"
++
++struct shmseg
++{
++    int valid;
++    uint64 kva;
++    int refcnt;
++};
++
++static struct shmseg shm;
++
++#endif
+diff --git a/kernel/syscall.c b/kernel/syscall.c
+index 076d965..e629626 100644
+--- a/kernel/syscall.c
++++ b/kernel/syscall.c
+@@ -6,6 +6,7 @@
+ #include "proc.h"
+ #include "syscall.h"
+ #include "defs.h"
++//#include "shm.h"
+ 
+ // Fetch the uint64 at addr from the current process.
+ int
+@@ -101,31 +102,41 @@ extern uint64 sys_unlink(void);
+ extern uint64 sys_link(void);
+ extern uint64 sys_mkdir(void);
+ extern uint64 sys_close(void);
++extern uint64 sys_shm_init(void);
++extern uint64 sys_shm_attach(void);
++extern uint64 sys_shm_detach(void);
++extern uint64 sys_shm_destroy(void);
++extern uint64 sys_shm_refcnt(void);
+ 
+ // An array mapping syscall numbers from syscall.h
+ // to the function that handles the system call.
+ static uint64 (*syscalls[])(void) = {
+-[SYS_fork]    sys_fork,
+-[SYS_exit]    sys_exit,
+-[SYS_wait]    sys_wait,
+-[SYS_pipe]    sys_pipe,
+-[SYS_read]    sys_read,
+-[SYS_kill]    sys_kill,
+-[SYS_exec]    sys_exec,
+-[SYS_fstat]   sys_fstat,
+-[SYS_chdir]   sys_chdir,
+-[SYS_dup]     sys_dup,
+-[SYS_getpid]  sys_getpid,
+-[SYS_sbrk]    sys_sbrk,
+-[SYS_pause]   sys_pause,
+-[SYS_uptime]  sys_uptime,
+-[SYS_open]    sys_open,
+-[SYS_write]   sys_write,
+-[SYS_mknod]   sys_mknod,
+-[SYS_unlink]  sys_unlink,
+-[SYS_link]    sys_link,
+-[SYS_mkdir]   sys_mkdir,
+-[SYS_close]   sys_close,
++    [SYS_fork] sys_fork,
++    [SYS_exit] sys_exit,
++    [SYS_wait] sys_wait,
++    [SYS_pipe] sys_pipe,
++    [SYS_read] sys_read,
++    [SYS_kill] sys_kill,
++    [SYS_exec] sys_exec,
++    [SYS_fstat] sys_fstat,
++    [SYS_chdir] sys_chdir,
++    [SYS_dup] sys_dup,
++    [SYS_getpid] sys_getpid,
++    [SYS_sbrk] sys_sbrk,
++    [SYS_pause] sys_pause,
++    [SYS_uptime] sys_uptime,
++    [SYS_open] sys_open,
++    [SYS_write] sys_write,
++    [SYS_mknod] sys_mknod,
++    [SYS_unlink] sys_unlink,
++    [SYS_link] sys_link,
++    [SYS_mkdir] sys_mkdir,
++    [SYS_close] sys_close,
++    [SYS_shm_init] sys_shm_init,
++    [SYS_shm_attach] sys_shm_attach,
++    [SYS_shm_detach] sys_shm_detach,
++    [SYS_shm_destroy] sys_shm_destroy,
++    [SYS_shm_refcnt] sys_shm_refcnt,
+ };
+ 
+ void
+diff --git a/kernel/syscall.h b/kernel/syscall.h
+index 3dd926d..39ace6c 100644
+--- a/kernel/syscall.h
++++ b/kernel/syscall.h
+@@ -20,3 +20,8 @@
+ #define SYS_link   19
+ #define SYS_mkdir  20
+ #define SYS_close  21
++#define SYS_shm_init  22
++#define SYS_shm_attach  23
++#define SYS_shm_detach  24
++#define SYS_shm_destroy 25
++#define SYS_shm_refcnt 26
+diff --git a/user/p2a.c b/user/p2a.c
+new file mode 100644
+index 0000000..5574092
+--- /dev/null
++++ b/user/p2a.c
+@@ -0,0 +1,89 @@
++#include "kernel/types.h"
++#include "user/user.h"
++
++#define NCHILD 2
++
++int main(void)
++{
++
++    // Initialize shared memory (refcnt should become 0)
++    printf("[Parent] Calling shm_init()...\n");
++    if (shm_init() < 0)
++    {
++        printf("[Parent] ERROR: shm_init failed\n");
++        exit(1);
++    }
++    printf("[Parent] shm_init SUCCESS\n");
++
++    printf("[Parent] Initial Refcount: %d (Expected: 0)\n", shm_refcnt());
++
++    // Create child processes that attach
++    for (int i = 0; i < NCHILD; i++)
++    {
++        int pid = fork();
++
++        if (pid == 0)
++        {
++            printf("[Child %d] Calling shm_attach()...\n", i);
++
++            if (shm_attach() < 0)
++            {
++                printf("[Child %d] ERROR: shm_attach failed\n", i);
++                exit(1);
++            }
++
++            printf("[Child %d] Attached | Refcount: %d\n",
++                   i, shm_refcnt());
++
++            // Keep it attached for a while so parent can test destroy failure
++            pause(20);
++
++            printf("[Child %d] Calling shm_detach()...\n", i);
++            if (shm_detach() < 0)
++            {
++                printf("[Child %d] ERROR: shm_detach failed\n", i);
++                exit(1);
++            }
++
++            printf("[Child %d] Detached | Refcount: %d\n",
++                   i, shm_refcnt());
++
++            exit(0);
++        }
++        pause(2);
++    }
++    
++    // Try to destroy while children are still attached
++    printf("\n[Parent] Attempting shm_destroy() while refcount > 0...\n");
++    if (shm_destroy() < 0)
++    {
++        printf("[Parent] CORRECT: shm_destroy FAILED (refcount not zero)\n");
++    }
++    else
++    {
++        printf("[Parent] ERROR: shm_destroy should not succeed!\n");
++    }
++
++    // Wait for all children to finish (they will detach)
++    for (int i = 0; i < NCHILD; i++)
++    {
++        wait(0);
++    }
++
++    // Refcount should now be 0
++    printf("\n[Parent] All children finished.\n");
++    printf("[Parent] Current Refcount: %d (Expected: 0)\n", shm_refcnt());
++
++    // Step 4: Now destroy should succeed
++    printf("[Parent] Attempting shm_destroy() again...\n");
++    if (shm_destroy() < 0)
++    {
++        printf("[Parent] ERROR: shm_destroy failed unexpectedly\n");
++    }
++    else
++    {
++        printf("[Parent] SUCCESS: shm_destroy worked (refcount = 0)\n");
++    }
++
++    exit(0);
++}
+diff --git a/user/p2b1.c b/user/p2b1.c
+new file mode 100644
+index 0000000..474f080
+--- /dev/null
++++ b/user/p2b1.c
+@@ -0,0 +1,120 @@
++#include "kernel/types.h"
++#include "user/user.h"
++
++int main()
++{
++    int pid;
++
++
++    // 1. Attach without init
++    printf("[Test 1] Attach without shm_init()...\n");
++    if (shm_attach() == -1)
++    {
++        printf("PASS: shm_attach() correctly failed\n\n");
++    }
++    else
++    {
++        printf("FAIL: shm_attach() should not succeed\n\n");
++    }
++
++    // 2. Destroy without init
++    printf("[Test 2] Destroy without shm_init()...\n");
++    if (shm_destroy() == -1)
++    {
++        printf("PASS: shm_destroy() correctly failed\n\n");
++    }
++    else
++    {
++        printf("FAIL: shm_destroy() should not succeed\n\n");
++    }
++
++    // 3. Early detach
++    printf("[Test 3] Detach before attach...\n");
++    shm_init();
++    if (shm_detach() == -1)
++    {
++        printf("PASS: shm_detach() correctly failed before attach\n\n");
++    }
++    else
++    {
++        printf("FAIL: shm_detach() should not succeed\n\n");
++    }
++
++    // 4. Multiple detaches in same process
++    printf("[Test 4] Multiple detaches in same process...\n");
++    if (shm_attach())
++    {
++        printf("First attach succeeded\n");
++    }
++    if (shm_detach() == 0)
++    {
++        printf("First detach succeeded\n");
++    }
++    if (shm_detach() == -1)
++    {
++        printf("PASS: Second detach correctly failed\n\n");
++    }
++    else
++    {
++        printf("FAIL: Second detach should not succeed\n\n");
++    }
++
++    // 5. Attach twice in same process
++    printf("[Test 5] Attach twice in same process...\n");
++    if (shm_attach())
++    {
++        printf("PASS: Re-attach succeeded (should allow attach after detach)\n");
++    }
++    if (shm_attach() == -1)
++    {
++        printf("PASS: Second attach correctly failed\n\n");
++    }
++    else
++    {
++        printf("FAIL: Second attach should not succeed\n\n");
++    }
++
++    printf("Detaching shared memory... \n");
++    if(shm_detach()==0)
++        printf("SUCCESS\n\n");
++    else
++        printf("ERROR\n\n");
++
++    // 6. Destroy while another process is attached
++    printf("[Test 6] Destroy while child attached...\n");
++    pid = fork();
++    if (pid == 0)
++    {
++        // Child
++        if (shm_attach())
++        {
++            printf("[Child] Attached to shared memory\n");
++        }
++        pause(7); // allow parent to attempt destroy
++        if (shm_detach() == 0)
++        {
++            printf("[Child] Detached successfully\n");
++        }
++        exit(0);
++    }
++    else
++    {
++        // Parent
++        pause(2); // give child time to attach
++        if (shm_destroy() == -1)
++        {
++            printf("[Parent] PASS: shm_destroy() failed while child attached\n");
++        }
++        else
++        {
++            printf("[Parent] FAIL: shm_destroy() should not succeed\n");
++        }
++        wait(0);
++        if (shm_destroy() == 0)
++        {
++            printf("[Parent] PASS: shm_destroy() succeeded after child detached\n");
++        }
++    }
++
++    exit(0);
++}
+diff --git a/user/p2b2.c b/user/p2b2.c
+new file mode 100644
+index 0000000..06ad2f1
+--- /dev/null
++++ b/user/p2b2.c
+@@ -0,0 +1,74 @@
++#include "kernel/types.h"
++#include "user/user.h"
++
++int main(void)
++{
++    int pid = fork();
++    if (pid < 0)
++    {
++        printf("fork failed\n");
++        exit(1);
++    }
++
++    if (pid == 0)
++    {
++
++        if (shm_init() < 0)
++        {
++            printf("[Child] shm_init failed\n");
++            exit(1);
++        }
++        printf("[Child] shm_init succeeded\n");
++
++        char *p = (char *)shm_attach();
++        if (p == 0)
++        {
++            printf("[Child] shm_attach failed\n");
++            exit(1);
++        }
++        printf("[Child] shm_attach succeeded\n");
++
++        strcpy(p, "Message from child");
++        printf("[Child] wrote: %s\n", p);
++
++        if (shm_detach() < 0)
++        {
++            printf("[Child] shm_detach failed\n");
++            exit(1);
++        }
++        printf("[Child] shm_detach succeeded\n");
++
++        exit(0);
++    }
++    else
++    {
++
++        wait(0);
++
++        char *p = (char *)shm_attach();
++        if (p == 0)
++        {
++            printf("[Parent] shm_attach failed\n");
++            exit(1);
++        }
++        printf("[Parent] shm_attach succeeded\n");
++
++        printf("[Parent] reads: %s\n", p);
++
++        if (shm_detach() < 0)
++        {
++            printf("[Parent] shm_detach failed\n");
++            exit(1);
++        }
++        printf("[Parent] shm_detach succeeded\n");
++
++        if (shm_destroy() < 0)
++        {
++            printf("[Parent] shm_destroy failed\n");
++            exit(1);
++        }
++        printf("[Parent] shm_destroy succeeded\n");
++
++        exit(0);
++    }
++}
+\ No newline at end of file
+diff --git a/user/user.h b/user/user.h
+index ac84de9..ee023e4 100644
+--- a/user/user.h
++++ b/user/user.h
+@@ -24,9 +24,14 @@ int getpid(void);
+ char* sys_sbrk(int,int);
+ int pause(int);
+ int uptime(void);
++int shm_init(void);
++uint64 shm_attach(void);
++int shm_detach(void);
++int shm_destroy(void);
++int shm_refcnt(void);
+ 
+ // ulib.c
+-int stat(const char*, struct stat*);
++int stat(const char *, struct stat *);
+ char* strcpy(char*, const char*);
+ void *memmove(void*, const void*, int);
+ char* strchr(const char*, char c);
+diff --git a/user/usys.pl b/user/usys.pl
+index c5d4c3a..b72feef 100755
+--- a/user/usys.pl
++++ b/user/usys.pl
+@@ -42,3 +42,8 @@ entry("getpid");
+ entry("sbrk");
+ entry("pause");
+ entry("uptime");
++entry("shm_init");
++entry("shm_attach");
++entry("shm_detach");
++entry("shm_destroy");
++entry("shm_refcnt");

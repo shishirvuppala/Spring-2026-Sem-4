@@ -1,0 +1,344 @@
+diff --git a/Makefile b/Makefile
+index b262c0a..5d1230f 100644
+--- a/Makefile
++++ b/Makefile
+@@ -145,6 +145,9 @@ UPROGS=\
+ 	$U/_logstress\
+ 	$U/_forphan\
+ 	$U/_dorphan\
++	$U/_p3a\
++	$U/_p3b\
++	$U/_p3c\
+ 
+ fs.img: mkfs/mkfs README $(UPROGS)
+ 	mkfs/mkfs fs.img README $(UPROGS)
+diff --git a/kernel/proc.c b/kernel/proc.c
+index 22a5401..988b03b 100644
+--- a/kernel/proc.c
++++ b/kernel/proc.c
+@@ -124,6 +124,7 @@ allocproc(void)
+ found:
+   p->pid = allocpid();
+   p->state = USED;
++  p->shm=0;
+ 
+   // Allocate a trapframe page.
+   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
+@@ -169,6 +170,7 @@ freeproc(struct proc *p)
+   p->killed = 0;
+   p->xstate = 0;
+   p->state = UNUSED;
++  p->shm=0;
+ }
+ 
+ // Create a user page table for a given process, with no user memory,
+diff --git a/kernel/proc.h b/kernel/proc.h
+index d021857..dc1728c 100644
+--- a/kernel/proc.h
++++ b/kernel/proc.h
+@@ -104,4 +104,5 @@ struct proc {
+   struct file *ofile[NOFILE];  // Open files
+   struct inode *cwd;           // Current directory
+   char name[16];               // Process name (debugging)
++  struct shm_channel *shm;
+ };
+diff --git a/kernel/syscall.c b/kernel/syscall.c
+index 076d965..7a64e97 100644
+--- a/kernel/syscall.c
++++ b/kernel/syscall.c
+@@ -101,6 +101,7 @@ extern uint64 sys_unlink(void);
+ extern uint64 sys_link(void);
+ extern uint64 sys_mkdir(void);
+ extern uint64 sys_close(void);
++extern uint64 sys_kmap(void);
+ 
+ // An array mapping syscall numbers from syscall.h
+ // to the function that handles the system call.
+@@ -126,6 +127,7 @@ static uint64 (*syscalls[])(void) = {
+ [SYS_link]    sys_link,
+ [SYS_mkdir]   sys_mkdir,
+ [SYS_close]   sys_close,
++[SYS_kmap]    sys_kmap,
+ };
+ 
+ void
+diff --git a/kernel/syscall.h b/kernel/syscall.h
+index 3dd926d..75bbfe1 100644
+--- a/kernel/syscall.h
++++ b/kernel/syscall.h
+@@ -20,3 +20,4 @@
+ #define SYS_link   19
+ #define SYS_mkdir  20
+ #define SYS_close  21
++#define SYS_kmap   22
+diff --git a/kernel/sysproc.c b/kernel/sysproc.c
+index 419e727..4d8744c 100644
+--- a/kernel/sysproc.c
++++ b/kernel/sysproc.c
+@@ -107,3 +107,29 @@ sys_uptime(void)
+   release(&tickslock);
+   return xticks;
+ }
++
++uint64
++sys_kmap(void)
++{
++  struct proc* p = myproc();
++  if (p->shm != 0) return -1;  // already initialized
++
++  char* mem = kalloc();
++  if (mem == 0) return -1;
++
++  memset(mem, 0, PGSIZE);
++
++  uint64 uaddr = PGROUNDUP(p->sz);
++  // calling heap after this might lead to holes in
++
++  if (mappages(p->pagetable, uaddr, PGSIZE, (uint64)mem,
++               PTE_R | PTE_W | PTE_U) < 0) {
++      kfree(mem);
++      return -1;
++  }
++
++  p->sz = uaddr + PGSIZE;
++  p->shm = (struct shm_channel*)mem;
++
++  return uaddr;
++}
+diff --git a/kernel/trap.c b/kernel/trap.c
+index a41cd69..82afad0 100644
+--- a/kernel/trap.c
++++ b/kernel/trap.c
+@@ -9,6 +9,7 @@
+ struct spinlock tickslock;
+ uint ticks;
+ 
++extern struct proc proc[NPROC];
+ extern char trampoline[], uservec[];
+ 
+ // in kernelvec.S, calls kerneltrap().
+@@ -68,6 +69,47 @@ usertrap(void)
+     syscall();
+   } else if((which_dev = devintr()) != 0){
+     // ok
++    if (which_dev == 2) {
++        struct proc* p = myproc();
++        if (p && p->shm) {
++            struct shm_channel* ch = p->shm;
++            if (ch->u_ready == 1) {
++                ch->k_data = ch->u_data;
++
++                switch (ch->cmd) {
++                    case CMD_GETPID:
++                        ch->result = p->pid;
++                        break;
++
++                    case CMD_GETPPID:
++                        ch->result = p->parent ? p->parent->pid : -1;
++                        break;
++
++                    case CMD_UPTIME:
++                        acquire(&tickslock);
++                        ch->result = ticks;
++                        release(&tickslock);
++                        break;
++
++                    case CMD_PROC_COUNT: {
++                        int count = 0;
++                        for (struct proc* pp = proc; pp < &proc[NPROC]; pp++)
++                            if (pp->state != UNUSED) count++;
++
++                        ch->result = count;
++                        break;
++                    }
++
++                    default:
++                        ch->result = -1;
++                }
++
++                ch->u_ack = 1;
++                ch->k_ready = 1;
++                ch->u_ready = 0;
++            }
++        }
++    }
+   } else if((r_scause() == 15 || r_scause() == 13) &&
+             vmfault(p->pagetable, r_stval(), (r_scause() == 13)? 1 : 0) != 0) {
+     // page fault on lazily-allocated page
+diff --git a/kernel/types.h b/kernel/types.h
+index ee73164..6e1bae0 100644
+--- a/kernel/types.h
++++ b/kernel/types.h
+@@ -8,3 +8,24 @@ typedef unsigned int  uint32;
+ typedef unsigned long uint64;
+ 
+ typedef uint64 pde_t;
++
++typedef enum {
++    CMD_NONE, CMD_GETPID, CMD_GETPPID, CMD_UPTIME, CMD_PROC_COUNT,
++} shm_cmd_t;
++
++struct shm_channel {
++    // User → Kernel
++    volatile uint8 u_ready;
++    volatile uint8 u_ack;
++
++    // Kernel → User
++    volatile uint8 k_ready;
++    volatile uint8 k_ack;
++
++    volatile uint64 u_data;
++    volatile uint64 k_data;
++
++    volatile shm_cmd_t cmd;
++    volatile uint64    arg;
++    volatile uint64    result;
++};
+diff --git a/user/p3a.c b/user/p3a.c
+new file mode 100644
+index 0000000..6508619
+--- /dev/null
++++ b/user/p3a.c
+@@ -0,0 +1,32 @@
++#include "kernel/types.h"
++#include "user/user.h"
++
++int
++main(int argc, char* argv[])
++{
++    int MAGIC_NUM = 42;
++    if (argc > 1) MAGIC_NUM = atoi(argv[1]);
++
++    struct shm_channel* ch = (struct shm_channel*)kmap();
++    if ((uint64)ch == -1) {
++        printf("kmap failed\n");
++        exit(1);
++    }
++
++    ch->u_ready = 0;
++    ch->u_data = MAGIC_NUM;
++    ch->u_ready = 1;
++
++    while (ch->u_ack == 0);
++
++    ch->u_ack = 0;
++    ch->k_ready = 0;
++
++    printf("Kernel responded: %d\n", (int)ch->k_data);
++    if (ch->k_data != MAGIC_NUM) {
++        printf("Unexpected response from kernel\n");
++        exit(1);
++    }
++
++    exit(0);
++}
+diff --git a/user/p3b.c b/user/p3b.c
+new file mode 100644
+index 0000000..a165cb6
+--- /dev/null
++++ b/user/p3b.c
+@@ -0,0 +1,50 @@
++#include "kernel/types.h"
++#include "user/user.h"
++
++int
++main(void)
++{
++    struct shm_channel* ch = (struct shm_channel*)kmap();
++    if ((uint64)ch == -1) {
++        printf("kmap failed\n");
++        exit(1);
++    }
++
++    // ----- GETPID -----
++
++    ch->cmd = CMD_GETPID;
++    ch->u_ready = 1;
++
++    while (ch->u_ack == 0);
++
++    printf("PID: %d\n", (int)ch->result);
++
++    ch->u_ack = 0;
++    ch->k_ready = 0;
++
++    // ----- GETPPID -----
++
++    ch->cmd = CMD_GETPPID;
++    ch->u_ready = 1;
++
++    while (ch->u_ack == 0);
++
++    printf("PPID: %d\n", (int)ch->result);
++
++    ch->u_ack = 0;
++    ch->k_ready = 0;
++
++    // ----- UPTIME -----
++
++    ch->cmd = CMD_UPTIME;
++    ch->u_ready = 1;
++
++    while (ch->u_ack == 0);
++
++    printf("Uptime: %d\n", (int)ch->result);
++
++    ch->u_ack = 0;
++    ch->k_ready = 0;
++
++    exit(0);
++}
+diff --git a/user/p3c.c b/user/p3c.c
+new file mode 100644
+index 0000000..35d96f3
+--- /dev/null
++++ b/user/p3c.c
+@@ -0,0 +1,26 @@
++#include "kernel/types.h"
++#include "user/user.h"
++
++int
++main(void)
++{
++    struct shm_channel* ch = (struct shm_channel*)kmap();
++    if ((uint64)ch == -1) {
++        printf("kmap failed\n");
++        exit(1);
++    }
++
++    // ----- PROC_COUNT -----
++
++    ch->cmd = CMD_PROC_COUNT;
++    ch->u_ready = 1;
++
++    while(ch->u_ack == 0);
++
++    printf("No of Processes: %d\n", (int)ch->result);
++
++    ch->u_ack = 0;
++    ch->k_ready = 0;
++
++    exit(0);
++}
+diff --git a/user/user.h b/user/user.h
+index ac84de9..c1a28fb 100644
+--- a/user/user.h
++++ b/user/user.h
+@@ -25,6 +25,8 @@ char* sys_sbrk(int,int);
+ int pause(int);
+ int uptime(void);
+ 
++uint64 kmap(void);
++
+ // ulib.c
+ int stat(const char*, struct stat*);
+ char* strcpy(char*, const char*);
+diff --git a/user/usys.pl b/user/usys.pl
+index c5d4c3a..2b69d68 100755
+--- a/user/usys.pl
++++ b/user/usys.pl
+@@ -42,3 +42,4 @@ entry("getpid");
+ entry("sbrk");
+ entry("pause");
+ entry("uptime");
++entry("kmap");

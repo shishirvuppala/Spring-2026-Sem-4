@@ -1,0 +1,7 @@
+To run the autograder, run the following commands in the grader/ directory
+
+1. bash prepare-directory.sh <path-to-your-q3-patch-file>
+2. python grader.py
+
+You can see your marks in result.csv.
+You can see the logs in result.log, or the live logs in terminal.

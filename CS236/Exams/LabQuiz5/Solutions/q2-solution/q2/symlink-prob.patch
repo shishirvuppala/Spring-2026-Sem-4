@@ -1,0 +1,598 @@
+diff --git a/Makefile b/Makefile
+index b262c0a..5d7adfe 100644
+--- a/Makefile
++++ b/Makefile
+@@ -133,6 +133,7 @@ UPROGS=\
+ 	$U/_init\
+ 	$U/_kill\
+ 	$U/_ln\
++	$U/_file\
+ 	$U/_ls\
+ 	$U/_mkdir\
+ 	$U/_rm\
+@@ -145,9 +146,10 @@ UPROGS=\
+ 	$U/_logstress\
+ 	$U/_forphan\
+ 	$U/_dorphan\
++	$U/_tc_symlink\
+ 
+-fs.img: mkfs/mkfs README $(UPROGS)
+-	mkfs/mkfs fs.img README $(UPROGS)
++fs.img: mkfs/mkfs README $(UPROGS) lorem.txt
++	mkfs/mkfs fs.img README $(UPROGS) lorem.txt
+ 
+ -include kernel/*.d user/*.d
+ 
+diff --git a/kernel/stat.h b/kernel/stat.h
+index 19543af..fe8ef73 100644
+--- a/kernel/stat.h
++++ b/kernel/stat.h
+@@ -1,6 +1,7 @@
+ #define T_DIR     1   // Directory
+ #define T_FILE    2   // File
+ #define T_DEVICE  3   // Device
++#define T_SYMLINK 4   // Symbolic Link
+ 
+ struct stat {
+   int dev;     // File system's disk device
+diff --git a/kernel/syscall.c b/kernel/syscall.c
+index 076d965..cba977c 100644
+--- a/kernel/syscall.c
++++ b/kernel/syscall.c
+@@ -101,6 +101,10 @@ extern uint64 sys_unlink(void);
+ extern uint64 sys_link(void);
+ extern uint64 sys_mkdir(void);
+ extern uint64 sys_close(void);
++extern uint64 sys_symlink(void);
++extern uint64 sys_filetype(void);
++extern uint64 sys_inoderefcount(void);
++extern uint64 sys_readlink(void);
+ 
+ // An array mapping syscall numbers from syscall.h
+ // to the function that handles the system call.
+@@ -126,6 +130,10 @@ static uint64 (*syscalls[])(void) = {
+ [SYS_link]    sys_link,
+ [SYS_mkdir]   sys_mkdir,
+ [SYS_close]   sys_close,
++[SYS_symlink]       sys_symlink,
++[SYS_filetype]      sys_filetype,
++[SYS_inoderefcount] sys_inoderefcount,
++[SYS_readlink]      sys_readlink,
+ };
+ 
+ void
+diff --git a/kernel/syscall.h b/kernel/syscall.h
+index 3dd926d..2cdc181 100644
+--- a/kernel/syscall.h
++++ b/kernel/syscall.h
+@@ -20,3 +20,7 @@
+ #define SYS_link   19
+ #define SYS_mkdir  20
+ #define SYS_close  21
++#define SYS_symlink       22
++#define SYS_filetype      23
++#define SYS_inoderefcount 24
++#define SYS_readlink      25
+diff --git a/kernel/sysfile.c b/kernel/sysfile.c
+index d8234ce..de5417a 100644
+--- a/kernel/sysfile.c
++++ b/kernel/sysfile.c
+@@ -16,6 +16,11 @@
+ #include "file.h"
+ #include "fcntl.h"
+ 
++struct symlink {
++  int length;            // Length of target file name
++  char target[MAXPATH];  // Target file name
++};
++
+ // Fetch the nth word-sized system call argument as a file descriptor
+ // and return both the descriptor and the corresponding struct file.
+ static int
+@@ -256,7 +261,7 @@ create(char *path, short type, short major, short minor)
+   if((ip = dirlookup(dp, name, 0)) != 0){
+     iunlockput(dp);
+     ilock(ip);
+-    if(type == T_FILE && (ip->type == T_FILE || ip->type == T_DEVICE))
++    if(type == T_FILE && (ip->type == T_FILE || ip->type == T_DEVICE)) // TODO
+       return ip;
+     iunlockput(ip);
+     return 0;
+@@ -341,6 +346,8 @@ sys_open(void)
+     return -1;
+   }
+ 
++  // TODO: handle symlinks, reading metadata and following the link
++
+   if((f = filealloc()) == 0 || (fd = fdalloc(f)) < 0){
+     if(f)
+       fileclose(f);
+@@ -503,3 +510,108 @@ sys_pipe(void)
+   }
+   return 0;
+ }
++
++uint64
++sys_symlink(void)
++{
++  char target[MAXPATH], path[MAXPATH];
++
++  if(argstr(0, target, MAXPATH) < 0 || argstr(1, path, MAXPATH) < 0)
++    return -1;
++
++  // TODO
++
++  return -1; // Change to return 0 on success
++}
++
++uint64
++sys_filetype(void)
++{
++  char path[MAXPATH];
++  struct inode *ip;
++  int type;
++
++  if(argstr(0, path, MAXPATH) < 0)
++    return -1;
++
++  begin_op();
++  if((ip = namei(path)) == 0){
++    end_op();
++    return -1;
++  }
++
++  ilock(ip);
++  type = ip->type;
++  iunlockput(ip);
++  end_op();
++  return type;
++}
++
++uint64
++sys_inoderefcount(void)
++{
++  char path[MAXPATH];
++  struct inode *ip;
++  int nlink;
++
++  if(argstr(0, path, MAXPATH) < 0)
++    return -1;
++
++  begin_op();
++  if((ip = namei(path)) == 0){
++    end_op();
++    return -1;
++  }
++
++  ilock(ip);
++  nlink = ip->nlink;
++  iunlockput(ip);
++  end_op();
++  return nlink;
++}
++
++uint64
++sys_readlink(void)
++{
++  char path[MAXPATH];
++  int n;
++  uint64 p;
++
++  struct inode *ip;
++  struct symlink sym;
++
++  if(argstr(0, path, MAXPATH) < 0)
++    return -1;
++  argaddr(1, &p);
++  argint(2, &n);
++  if(n <= 0)
++    return -1;
++
++  begin_op();
++  if((ip = namei(path)) == 0){
++    end_op();
++    return -1;
++  }
++
++  ilock(ip);
++  if(ip->type != T_SYMLINK){
++    iunlockput(ip);
++    end_op();
++    return -1;
++  }
++
++  if(readi(ip, 0, (uint64)&sym, 0, sizeof(sym)) != sizeof(sym)){
++    iunlockput(ip);
++    end_op();
++    return -1;
++  }
++
++  iunlockput(ip);
++  end_op();
++
++  if(n > MAXPATH)
++    n = MAXPATH;
++  if(copyout(myproc()->pagetable, p, sym.target, n) < 0)
++    return -1;
++  return n;
++}
+diff --git a/lorem.txt b/lorem.txt
+new file mode 100644
+index 0000000..85e73d4
+--- /dev/null
++++ b/lorem.txt
+@@ -0,0 +1 @@
++Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.
+diff --git a/user/file.c b/user/file.c
+new file mode 100644
+index 0000000..3dd482e
+--- /dev/null
++++ b/user/file.c
+@@ -0,0 +1,68 @@
++#include "kernel/types.h"
++#include "kernel/stat.h"
++#include "kernel/param.h"
++#include "user/user.h"
++
++static char*
++typestr(int t)
++{
++  switch(t) {
++  case T_DIR:
++    return "dir";
++  case T_FILE:
++    return "file";
++  case T_DEVICE:
++    return "device";
++  case T_SYMLINK:
++    return "symlink";
++  default:
++    return "unknown";
++  }
++}
++
++static void
++show(char* path)
++{
++  int type, inode_rc;
++  char target[MAXPATH];
++  int n;
++
++  type = filetype(path);
++  if(type < 0) {
++    fprintf(2, "file: cannot query %s\n", path);
++    return;
++  }
++
++  inode_rc = inoderefcount(path);
++  if(inode_rc < 0) {
++    fprintf(2, "file: cannot query inode ref count for %s\n", path);
++    return;
++  }
++
++  if(type == T_SYMLINK) {
++    n = readlink(path, target, sizeof(target));
++    if(n < 0) {
++      fprintf(2, "file: cannot readlink %s\n", path);
++      return;
++    }
++    printf("%s: type=%d (%s), inode refcount=%d, target=%s\n", path, type, typestr(type), inode_rc, target);
++  } else {
++    printf("%s: type=%d (%s), inode refcount=%d\n", path, type, typestr(type), inode_rc);
++  }
++}
++
++int
++main(int argc, char* argv[])
++{
++  int i;
++
++  if(argc < 2) {
++    fprintf(2, "Usage: file path...\n");
++    exit(1);
++  }
++
++  for(i = 1; i < argc; i++)
++    show(argv[i]);
++
++  exit(0);
++}
+diff --git a/user/ln.c b/user/ln.c
+index 1894143..ad99e80 100644
+--- a/user/ln.c
++++ b/user/ln.c
+@@ -3,13 +3,25 @@
+ #include "user/user.h"
+ 
+ int
+-main(int argc, char *argv[])
++main(int argc, char* argv[])
+ {
+-  if(argc != 3){
+-    fprintf(2, "Usage: ln old new\n");
++  if((argc != 3 || strcmp(argv[1], "-s") == 0) &&
++     (argc != 4 || strcmp(argv[1], "-s") != 0)) {
++    fprintf(2, "Usage: ln [-s] target link_name\n");
+     exit(1);
+   }
+-  if(link(argv[1], argv[2]) < 0)
+-    fprintf(2, "link %s %s: failed\n", argv[1], argv[2]);
++
++  if(strcmp(argv[1], "-s") == 0) {
++    if(symlink(argv[2], argv[3]) < 0) {
++      fprintf(2, "symlink %s %s: failed\n", argv[2], argv[3]);
++      exit(1);
++    }
++  } else {
++    if(link(argv[1], argv[2]) < 0) {
++      fprintf(2, "link %s %s: failed\n", argv[1], argv[2]);
++      exit(1);
++    }
++  }
++
+   exit(0);
+ }
+diff --git a/user/tc_symlink.c b/user/tc_symlink.c
+new file mode 100644
+index 0000000..4c1905e
+--- /dev/null
++++ b/user/tc_symlink.c
+@@ -0,0 +1,231 @@
++#include "kernel/types.h"
++#include "kernel/stat.h"
++#include "kernel/param.h"
++#include "kernel/fcntl.h"
++#include "user/user.h"
++
++#define DEFAULT_ORIG_FILE "orig.txt"
++#define DEFAULT_LINK_FILE "link.txt"
++
++void
++cleanup(const char* orig_file, const char* link_file)
++{
++  unlink(link_file);
++  unlink(orig_file);
++}
++
++const char*
++filetype_str(int type)
++{
++  switch(type) {
++  case T_FILE:
++    return "T_FILE";
++  case T_DIR:
++    return "T_DIR";
++  case T_SYMLINK:
++    return "T_SYMLINK";
++  default:
++    return "UNKNOWN";
++  }
++}
++
++void
++test_symlink(const char* orig_file, const char* link_file)
++{
++  char buf[128];
++  int fd, n;
++  int type_orig, type_link;
++  int refcount_orig, refcount_link;
++  char linkpath[MAXPATH];
++
++  cleanup(orig_file, link_file);
++
++  printf("\n========== SYMLINK TEST SUITE ==========\n\n");
++
++  printf("[STEP 1] Creating original file '%s'...\n", orig_file);
++
++  fd = open(orig_file, O_CREATE | O_WRONLY | O_TRUNC);
++  if(fd < 0) {
++    fprintf(2, "ERROR: Failed to create %s\n", orig_file);
++    exit(1);
++  }
++
++  if(write(fd, "original content", 16) != 16) {
++    fprintf(2, "ERROR: Failed to write to %s\n", orig_file);
++    exit(1);
++  }
++  close(fd);
++
++  printf("SUCCESS: Created '%s' with content 'original "
++         "content'\n\n",
++         orig_file);
++
++  printf("[STEP 2] Creating symbolic link '%s' -> "
++         "'%s'...\n",
++         link_file, orig_file);
++
++  if(symlink(orig_file, link_file) < 0) {
++    fprintf(2, "ERROR: symlink syscall failed\n");
++    exit(1);
++  }
++
++  printf("SUCCESS: Symlink created\n\n");
++
++  printf("[STEP 3] Verifying file types...\n");
++
++  type_orig = filetype(orig_file);
++  if(type_orig != T_FILE) {
++    fprintf(2, "ERROR: %s has type %s (expected T_FILE)\n", orig_file,
++            filetype_str(type_orig));
++    exit(1);
++  }
++
++  printf("%s type: %s  ✓\n", orig_file, filetype_str(type_orig));
++
++  type_link = filetype(link_file);
++  if(type_link != T_SYMLINK) {
++    fprintf(2, "ERROR: %s has type %s (expected T_SYMLINK)\n", link_file,
++            filetype_str(type_link));
++    exit(1);
++  }
++
++  printf("%s type: %s  ✓\n\n", link_file, filetype_str(type_link));
++
++  printf("[STEP 4] Testing readlink syscall...\n");
++
++  n = readlink(link_file, linkpath, MAXPATH);
++  if(n < 0) {
++    fprintf(2, "ERROR: readlink syscall failed\n");
++    exit(1);
++  }
++
++  linkpath[n] = 0;
++  if(strcmp(linkpath, orig_file) != 0) {
++    fprintf(2, "ERROR: readlink returned '%s' (expected '%s')\n", linkpath,
++            orig_file);
++    exit(1);
++  }
++
++  printf("readlink('%s') = '%s'  ✓\n\n", link_file, linkpath);
++
++  printf("[STEP 5] Checking inode reference counts...\n");
++
++  refcount_orig = inoderefcount(orig_file);
++  if(refcount_orig != 1) {
++    fprintf(2, "ERROR: %s has refcount %d (expected 1)\n", orig_file,
++            refcount_orig);
++    exit(1);
++  }
++
++  printf("%s inode refcount: %d  ✓\n", orig_file, refcount_orig);
++
++  refcount_link = inoderefcount(link_file);
++  if(refcount_link != 1) {
++    fprintf(2, "ERROR: %s has refcount %d (expected 1)\n", link_file,
++            refcount_link);
++    exit(1);
++  }
++
++  printf("%s inode refcount: %d  ✓\n", link_file, refcount_link);
++  printf("(Symlinks have separate inodes, don't increment target "
++         "refcount)\n\n");
++
++  printf("[STEP 6] Testing write redirection through symlink...\n");
++  printf("Writing 'through symlink' to %s...\n", link_file);
++
++  fd = open(link_file, O_WRONLY | O_TRUNC);
++  if(fd < 0) {
++    fprintf(2, "ERROR: Failed to open %s for writing\n", link_file);
++    exit(1);
++  }
++
++  if(write(fd, "through symlink", 15) != 15) {
++    fprintf(2, "ERROR: Write through symlink failed\n");
++    exit(1);
++  }
++  close(fd);
++
++  printf("Reading from %s to verify write went through...\n", orig_file);
++
++  fd = open(orig_file, O_RDONLY);
++  if(fd < 0) {
++    fprintf(2, "ERROR: Failed to open %s for reading\n", orig_file);
++    exit(1);
++  }
++
++  memset(buf, 0, sizeof(buf));
++  n = read(fd, buf, sizeof(buf));
++  if(n < 0) {
++    fprintf(2, "ERROR: Read from %s failed\n", orig_file);
++    exit(1);
++  }
++  close(fd);
++
++  if(strcmp(buf, "through symlink") != 0) {
++    fprintf(2, "ERROR: %s contains '%s' (expected 'through symlink')\n",
++            orig_file, buf);
++    exit(1);
++  }
++
++  printf("Result: %s contains '%s'  ✓\n", orig_file, buf);
++  printf("(Write through symlink correctly redirected to target!)\n\n");
++
++  printf("[STEP 7] Testing read redirection through symlink...\n");
++  printf("Writing 'direct to orig' to %s...\n", orig_file);
++
++  fd = open(orig_file, O_WRONLY | O_TRUNC);
++  if(fd < 0) {
++    fprintf(2, "ERROR: Failed to open %s for writing\n", orig_file);
++    exit(1);
++  }
++
++  if(write(fd, "direct to orig", 14) != 14) {
++    fprintf(2, "ERROR: Write to %s failed\n", orig_file);
++    exit(1);
++  }
++  close(fd);
++
++  printf("Reading from %s to verify read goes through...\n", link_file);
++
++  fd = open(link_file, O_RDONLY);
++  if(fd < 0) {
++    fprintf(2, "ERROR: Failed to open %s for reading\n", link_file);
++    exit(1);
++  }
++
++  memset(buf, 0, sizeof(buf));
++  n = read(fd, buf, sizeof(buf));
++  if(n < 0) {
++    fprintf(2, "ERROR: Read from %s failed\n", link_file);
++    exit(1);
++  }
++  close(fd);
++
++  if(strcmp(buf, "direct to orig") != 0) {
++    fprintf(2, "ERROR: %s contains '%s' (expected 'direct to orig')\n",
++            link_file, buf);
++    exit(1);
++  }
++
++  printf("Result: %s contains '%s'  ✓\n", link_file, buf);
++  printf("(Read through symlink correctly resolved to target!)\n\n");
++
++  printf("========== ALL SYMLINK TESTS PASSED! ==========\n\n");
++
++  cleanup(orig_file, link_file);
++}
++
++int
++main(int argc, char* argv[])
++{
++  const char* orig_file = DEFAULT_ORIG_FILE;
++  const char* link_file = DEFAULT_LINK_FILE;
++
++  if(argc >= 2)
++    orig_file = argv[1];
++  if(argc >= 3)
++    link_file = argv[2];
++
++  test_symlink(orig_file, link_file);
++  exit(0);
++}
+diff --git a/user/user.h b/user/user.h
+index ac84de9..41f090f 100644
+--- a/user/user.h
++++ b/user/user.h
+@@ -24,6 +24,10 @@ int getpid(void);
+ char* sys_sbrk(int,int);
+ int pause(int);
+ int uptime(void);
++int symlink(const char* target, const char* path);
++int filetype(const char* path);
++int inoderefcount(const char* path);
++int readlink(const char* path, char* buf, int n);
+ 
+ // ulib.c
+ int stat(const char*, struct stat*);
+diff --git a/user/usys.pl b/user/usys.pl
+index c5d4c3a..2277be7 100755
+--- a/user/usys.pl
++++ b/user/usys.pl
+@@ -42,3 +42,7 @@ entry("getpid");
+ entry("sbrk");
+ entry("pause");
+ entry("uptime");
++entry("symlink");
++entry("filetype");
++entry("inoderefcount");
++entry("readlink");
