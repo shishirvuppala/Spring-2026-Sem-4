@@ -1,0 +1,13 @@
+{
+  "case_id": 0,
+  "name": "1D_depth0_ridge",
+  "desc": "1-D noiseless linear, depth=0. Tests global Ridge formula.",
+  "max_depth": 0,
+  "lam": 1.0,
+  "r2_ref": 0.9945683598155467,
+  "mse_ref": 0.011468144963282863,
+  "y_std": 1.4530517795619138,
+  "r2_threshold": 0.9445683598155467,
+  "mse_threshold": 0.022936289926565726,
+  "mad_threshold": 0.29061035591238277
+}

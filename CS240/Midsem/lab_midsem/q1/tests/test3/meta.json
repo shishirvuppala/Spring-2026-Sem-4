@@ -1,0 +1,9 @@
+{
+  "test_id": 6,
+  "dataset_name": "sparse_interaction",
+  "description": "",
+  "lambda_ref": 41.0,
+  "accuracy_ref": 0.79,
+  "accuracy_threshold": 0.74,
+  "mad_threshold": 0.52
+}

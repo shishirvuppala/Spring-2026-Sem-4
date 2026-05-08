@@ -1,0 +1,13 @@
+{
+  "case_id": 4,
+  "name": "3D_sinusoidal_depth2",
+  "desc": "3-D sinusoidal surface, depth=2. Tests multi-level split recursion.",
+  "max_depth": 2,
+  "lam": 0.1,
+  "r2_ref": 0.9270434869403789,
+  "mse_ref": 0.7385972979249195,
+  "y_std": 3.1817922732148296,
+  "r2_threshold": 0.8470434869403789,
+  "mse_threshold": 1.8464932448122986,
+  "mad_threshold": 0.9545376819644489
+}

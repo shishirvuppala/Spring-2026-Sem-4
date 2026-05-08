@@ -1,0 +1,13 @@
+{
+  "case_id": 1,
+  "name": "2D_depth1_moderate_lam",
+  "desc": "2-D linear + noise, depth=1. Tests basic single-split path.",
+  "max_depth": 1,
+  "lam": 0.5,
+  "r2_ref": 0.3265230626307244,
+  "mse_ref": 1.2786696654003002,
+  "y_std": 1.3779003707876174,
+  "r2_threshold": 0.24652306263072438,
+  "mse_threshold": 2.5573393308006005,
+  "mad_threshold": 0.34447509269690435
+}

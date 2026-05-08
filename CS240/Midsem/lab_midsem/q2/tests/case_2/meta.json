@@ -1,0 +1,13 @@
+{
+  "case_id": 2,
+  "name": "1D_piecewise_depth1",
+  "desc": "1-D piecewise linear (known boundary at x=5), depth=1.",
+  "max_depth": 1,
+  "lam": 0.01,
+  "r2_ref": 0.9902773789402248,
+  "mse_ref": 0.20993993910983152,
+  "y_std": 4.646820041180734,
+  "r2_threshold": 0.9402773789402248,
+  "mse_threshold": 0.41987987821966305,
+  "mad_threshold": 0.929364008236147
+}

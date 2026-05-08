@@ -1,0 +1,13 @@
+{
+  "case_id": 3,
+  "name": "quadrant_depth3_main_task",
+  "desc": "4-quadrant piecewise-linear surface, depth=3. Core task dataset.",
+  "max_depth": 3,
+  "lam": 0.1,
+  "r2_ref": 0.9768376211160417,
+  "mse_ref": 3.0282041259420676,
+  "y_std": 11.434073845409559,
+  "r2_threshold": 0.9368376211160416,
+  "mse_threshold": 4.542306188913101,
+  "mad_threshold": 1.7151110768114337
+}

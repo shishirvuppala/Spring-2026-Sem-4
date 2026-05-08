@@ -1,0 +1,11 @@
+Q1.
+You should have noticed that for OLS, R^2 on train data = corr^2 (y, y_hat). Try to prove the same mathematically.
+Additionally, note the strong sensitivity of the OLS solution to outliers. In particular, the presence of as few as 40 outliers among 1040 data points can significantly degrade the model performance, effectively destroying the R^2 value.
+Finally, observe that fitting a model class that is insufficiently expressive for the true data-generating process—such as using a linear model without an intercept—results in a very high mean squared error (MSE) and a correspondingly low R^2. 
+
+Q2. 
+The polynomial used to generate the data for q2 is as follows:
+
+0.5 - 0.75 * x - x**2 + 0.8 * x**3 
+
+The optimal polynomial degree selected via cross-validation depends on the random seed and the specific train–validation splits. However, you should observe that even when higher-degree polynomials are selected, the learned coefficients for terms of degree greater than 3 are very close to zero. Moreover, the differences in cross-validation error across these higher-degree models are negligible.

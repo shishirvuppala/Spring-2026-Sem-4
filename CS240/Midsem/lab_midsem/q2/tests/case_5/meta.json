@@ -1,0 +1,13 @@
+{
+  "case_id": 5,
+  "name": "2D_depth3_high_lam",
+  "desc": "2-D quad surface, high lam=10. Tests regularisation shrinkage path.",
+  "max_depth": 3,
+  "lam": 10.0,
+  "r2_ref": 0.9468852955105603,
+  "mse_ref": 6.734689587727099,
+  "y_std": 11.260337480304162,
+  "r2_threshold": 0.8468852955105604,
+  "mse_threshold": 16.83672396931775,
+  "mad_threshold": 3.9411181181064565
+}

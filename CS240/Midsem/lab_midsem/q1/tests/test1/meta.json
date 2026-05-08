@@ -1,0 +1,9 @@
+{
+  "test_id": 3,
+  "dataset_name": "correlated_weights",
+  "description": "",
+  "lambda_ref": 6.0,
+  "accuracy_ref": 0.965,
+  "accuracy_threshold": 0.9149999999999999,
+  "mad_threshold": 0.17
+}
